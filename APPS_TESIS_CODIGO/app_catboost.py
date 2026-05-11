@@ -83,15 +83,25 @@ predictoras = st.sidebar.multiselect(
     default=predictoras_disponibles
 )
 
-st.sidebar.subheader("Parámetros del modelo")
+st.sidebar.subheader("División de datos")
 
 test_size = st.sidebar.slider(
-    "Tamaño del conjunto de prueba",
+    "Porcentaje para test",
     min_value=0.10,
-    max_value=0.50,
+    max_value=0.40,
     value=0.20,
     step=0.05
 )
+
+valid_size = st.sidebar.slider(
+    "Porcentaje para validación",
+    min_value=0.10,
+    max_value=0.40,
+    value=0.20,
+    step=0.05
+)
+
+st.sidebar.subheader("Parámetros del modelo")
 
 random_state = st.sidebar.number_input(
     "Random state",
@@ -101,10 +111,10 @@ random_state = st.sidebar.number_input(
 )
 
 iterations = st.sidebar.slider(
-    "Iteraciones",
+    "Iteraciones máximas",
     min_value=100,
-    max_value=3000,
-    value=1000,
+    max_value=5000,
+    value=2000,
     step=100
 )
 
@@ -124,6 +134,19 @@ depth = st.sidebar.slider(
     value=6,
     step=1
 )
+
+early_stopping_rounds = st.sidebar.slider(
+    "Early stopping rounds",
+    min_value=10,
+    max_value=300,
+    value=50,
+    step=10
+)
+
+
+if test_size + valid_size >= 0.90:
+    st.error("La suma de test y validación debe dejar suficiente proporción para entrenamiento.")
+    st.stop()
 
 
 if len(predictoras) == 0:
@@ -162,21 +185,38 @@ cat_features = [
     if str(X[col].dtype) == "category"
 ]
 
-X_train, X_test, y_train, y_test = train_test_split(
+# Separación train / valid / test
+X_temp, X_test, y_temp, y_test = train_test_split(
     X,
     y,
     test_size=test_size,
     random_state=int(random_state)
 )
 
+valid_relative_size = valid_size / (1 - test_size)
+
+X_train, X_valid, y_train, y_valid = train_test_split(
+    X_temp,
+    y_temp,
+    test_size=valid_relative_size,
+    random_state=int(random_state)
+)
+
 
 st.subheader("Configuración seleccionada")
 
-col_a, col_b, col_c = st.columns(3)
+col_a, col_b, col_c, col_d = st.columns(4)
 
 col_a.metric("Target", target)
 col_b.metric("Predictores", len(predictoras))
 col_c.metric("Filas usadas", df_model.shape[0])
+col_d.metric("Categóricas", len(cat_features))
+
+col_e, col_f, col_g = st.columns(3)
+
+col_e.metric("Train", X_train.shape[0])
+col_f.metric("Validación", X_valid.shape[0])
+col_g.metric("Test", X_test.shape[0])
 
 with st.expander("Ver variables seleccionadas"):
     st.write("**Target:**", target)
@@ -185,19 +225,23 @@ with st.expander("Ver variables seleccionadas"):
 
 
 if st.sidebar.button("Entrenar CatBoost"):
-    with st.spinner("Entrenando modelo CatBoost..."):
+    with st.spinner("Entrenando modelo CatBoost con validación y early stopping..."):
         model = CatBoostRegressor(
             iterations=iterations,
             learning_rate=learning_rate,
             depth=depth,
             loss_function="RMSE",
+            eval_metric="RMSE",
             random_seed=int(random_state),
+            early_stopping_rounds=early_stopping_rounds,
+            use_best_model=True,
             verbose=False
         )
 
         model.fit(
             X_train,
             y_train,
+            eval_set=(X_valid, y_valid),
             cat_features=cat_features if len(cat_features) > 0 else None
         )
 
@@ -210,14 +254,16 @@ if st.sidebar.button("Entrenar CatBoost"):
 
     st.success("Modelo entrenado correctamente.")
 
-    st.subheader("Métricas del modelo")
+    st.subheader("Métricas en test")
 
     col1, col2, col3, col4 = st.columns(4)
 
-    col1.metric("MAE", f"{mae:,.4f}")
-    col2.metric("MSE", f"{mse:,.4f}")
-    col3.metric("RMSE", f"{rmse:,.4f}")
-    col4.metric("R²", f"{r2:,.4f}")
+    col1.metric("R²", f"{r2:,.4f}")
+    col2.metric("RMSE", f"{rmse:,.4f}")
+    col3.metric("MAE", f"{mae:,.4f}")
+    col4.metric("MSE", f"{mse:,.4f}")
+
+    st.write(f"**Mejor iteración:** {model.get_best_iteration()}")
 
     st.subheader("Gráfico: Real vs Predicho")
 
@@ -234,11 +280,55 @@ if st.sidebar.button("Entrenar CatBoost"):
         linestyle="--"
     )
 
+    texto_metricas = (
+        f"R² = {r2:.4f}\n"
+        f"RMSE = {rmse:.4f}\n"
+        f"MAE = {mae:.4f}\n"
+        f"MSE = {mse:.4f}"
+    )
+
+    ax.text(
+        0.05,
+        0.95,
+        texto_metricas,
+        transform=ax.transAxes,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", alpha=0.15)
+    )
+
     ax.set_xlabel("Valor real")
     ax.set_ylabel("Valor predicho")
     ax.set_title("Real vs Predicho")
 
     st.pyplot(fig)
+
+    st.subheader("Curva de aprendizaje")
+
+    evals_result = model.get_evals_result()
+
+    train_rmse = evals_result["learn"]["RMSE"]
+    valid_rmse = evals_result["validation"]["RMSE"]
+
+    curva = pd.DataFrame({
+        "iteracion": np.arange(1, len(train_rmse) + 1),
+        "RMSE train": train_rmse,
+        "RMSE validación": valid_rmse
+    })
+
+    fig_learning, ax_learning = plt.subplots(figsize=(10, 5))
+
+    ax_learning.plot(curva["iteracion"], curva["RMSE train"], label="RMSE train")
+    ax_learning.plot(curva["iteracion"], curva["RMSE validación"], label="RMSE validación")
+
+    ax_learning.set_xlabel("Iteración")
+    ax_learning.set_ylabel("RMSE")
+    ax_learning.set_title("Curva de aprendizaje")
+    ax_learning.legend()
+
+    st.pyplot(fig_learning)
+
+    with st.expander("Ver datos de la curva de aprendizaje"):
+        st.dataframe(curva)
 
     st.subheader("Importancia de variables")
 
@@ -249,17 +339,18 @@ if st.sidebar.button("Entrenar CatBoost"):
 
     st.dataframe(importancias)
 
-    fig2, ax2 = plt.subplots(figsize=(10, 5))
+    importancias_plot = importancias.sort_values("importancia", ascending=True)
 
-    ax2.bar(importancias["variable"], importancias["importancia"])
-    ax2.set_xlabel("Variable")
-    ax2.set_ylabel("Importancia")
+    fig2, ax2 = plt.subplots(figsize=(10, max(5, len(importancias_plot) * 0.35)))
+
+    ax2.barh(importancias_plot["variable"], importancias_plot["importancia"])
+    ax2.set_xlabel("Importancia")
+    ax2.set_ylabel("Variable")
     ax2.set_title("Importancia de variables")
-    ax2.tick_params(axis="x", rotation=45)
 
     st.pyplot(fig2)
 
-    st.subheader("Predicciones")
+    st.subheader("Predicciones en test")
 
     resultados = pd.DataFrame({
         "real": y_test.values,
