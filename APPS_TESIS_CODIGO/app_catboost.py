@@ -16,24 +16,30 @@ st.set_page_config(
 )
 
 st.title("CatBoost Regressor")
-st.write("Sube un CSV o Parquet, elige target y predictores, y entrena un modelo de regresión.")
+st.write(
+    "Sube un archivo CSV o Parquet, elige la variable target, selecciona predictores "
+    "y entrena un modelo CatBoost de regresión."
+)
 
 
 @st.cache_data
 def cargar_california_housing():
     data = fetch_california_housing(as_frame=True)
-    df = data.frame
+    df = data.frame.copy()
     df["target"] = data.target
     return df
 
 
 def cargar_archivo(uploaded_file):
-    if uploaded_file.name.endswith(".csv"):
+    nombre = uploaded_file.name.lower()
+
+    if nombre.endswith(".csv"):
         return pd.read_csv(uploaded_file)
-    elif uploaded_file.name.endswith(".parquet"):
+
+    if nombre.endswith(".parquet"):
         return pd.read_parquet(uploaded_file)
-    else:
-        raise ValueError("Formato no soportado. Usa CSV o Parquet.")
+
+    raise ValueError("Formato no soportado. Usa CSV o Parquet.")
 
 
 uploaded_file = st.sidebar.file_uploader(
@@ -55,6 +61,11 @@ st.dataframe(df.head())
 st.write(f"Filas: **{df.shape[0]}** | Columnas: **{df.shape[1]}**")
 
 
+if df.shape[1] < 2:
+    st.error("El dataset debe tener al menos dos columnas: una target y una predictora.")
+    st.stop()
+
+
 columnas = df.columns.tolist()
 
 target = st.sidebar.selectbox(
@@ -63,19 +74,21 @@ target = st.sidebar.selectbox(
     index=columnas.index("target") if "target" in columnas else 0
 )
 
-predictoras_default = [col for col in columnas if col != target]
+predictoras_disponibles = [col for col in columnas if col != target]
 
 predictoras = st.sidebar.multiselect(
     "Elige las variables predictoras",
-    [col for col in columnas if col != target],
-    default=predictoras_default
+    predictoras_disponibles,
+    default=predictoras_disponibles
 )
+
+st.sidebar.subheader("Parámetros del modelo")
 
 test_size = st.sidebar.slider(
     "Tamaño del conjunto de prueba",
-    min_value=0.1,
-    max_value=0.5,
-    value=0.2,
+    min_value=0.10,
+    max_value=0.50,
+    value=0.20,
     step=0.05
 )
 
@@ -97,8 +110,8 @@ iterations = st.sidebar.slider(
 learning_rate = st.sidebar.slider(
     "Learning rate",
     min_value=0.001,
-    max_value=0.3,
-    value=0.05,
+    max_value=0.300,
+    value=0.050,
     step=0.001,
     format="%.3f"
 )
@@ -119,14 +132,32 @@ if len(predictoras) == 0:
 
 df_model = df[[target] + predictoras].copy()
 
+# Convertir columnas tipo texto a categóricas
 for col in df_model.columns:
     if df_model[col].dtype == "object":
         df_model[col] = df_model[col].astype("category")
 
+# Eliminar filas con valores nulos
+filas_antes = df_model.shape[0]
 df_model = df_model.dropna()
+filas_despues = df_model.shape[0]
+
+if filas_despues < filas_antes:
+    st.info(f"Se eliminaron {filas_antes - filas_despues} filas con valores nulos.")
+
+if df_model.shape[0] < 10:
+    st.error("Después de eliminar nulos quedan muy pocas filas para entrenar el modelo.")
+    st.stop()
+
 
 X = df_model[predictoras]
 y = df_model[target]
+
+# Validar que la target sea numérica
+if not pd.api.types.is_numeric_dtype(y):
+    st.error("La variable target debe ser numérica para usar CatBoostRegressor.")
+    st.stop()
+
 
 cat_features = [
     col for col in X.columns
@@ -137,39 +168,61 @@ X_train, X_test, y_train, y_test = train_test_split(
     X,
     y,
     test_size=test_size,
-    random_state=random_state
+    random_state=int(random_state)
 )
 
 
+st.subheader("Configuración seleccionada")
+
+col_a, col_b, col_c = st.columns(3)
+
+col_a.metric("Target", target)
+col_b.metric("Predictores", len(predictoras))
+col_c.metric("Filas usadas", df_model.shape[0])
+
+with st.expander("Ver variables seleccionadas"):
+    st.write("**Target:**", target)
+    st.write("**Predictoras:**", predictoras)
+    st.write("**Variables categóricas detectadas:**", cat_features if cat_features else "Ninguna")
+
+
 if st.sidebar.button("Entrenar CatBoost"):
-    model = CatBoostRegressor(
-        iterations=iterations,
-        learning_rate=learning_rate,
-        depth=depth,
-        loss_function="RMSE",
-        random_seed=random_state,
-        verbose=False
-    )
+    with st.spinner("Entrenando modelo CatBoost..."):
+        model = CatBoostRegressor(
+            iterations=iterations,
+            learning_rate=learning_rate,
+            depth=depth,
+            loss_function="RMSE",
+            random_seed=int(random_state),
+            verbose=False
+        )
 
-    model.fit(
-        X_train,
-        y_train,
-        cat_features=cat_features if len(cat_features) > 0 else None
-    )
+        model.fit(
+            X_train,
+            y_train,
+            cat_features=cat_features if len(cat_features) > 0 else None
+        )
 
-    y_pred = model.predict(X_test)
+        y_pred = model.predict(X_test)
 
     mae = mean_absolute_error(y_test, y_pred)
-    rmse = mean_squared_error(y_test, y_pred, squared=False)
+
+    # Corrección compatible con versiones nuevas de scikit-learn
+    mse = mean_squared_error(y_test, y_pred)
+    rmse = np.sqrt(mse)
+
     r2 = r2_score(y_test, y_pred)
+
+    st.success("Modelo entrenado correctamente.")
 
     st.subheader("Métricas del modelo")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     col1.metric("MAE", f"{mae:,.4f}")
-    col2.metric("RMSE", f"{rmse:,.4f}")
-    col3.metric("R²", f"{r2:,.4f}")
+    col2.metric("MSE", f"{mse:,.4f}")
+    col3.metric("RMSE", f"{rmse:,.4f}")
+    col4.metric("R²", f"{r2:,.4f}")
 
     st.subheader("Gráfico: Real vs Predicho")
 
@@ -202,6 +255,7 @@ if st.sidebar.button("Entrenar CatBoost"):
     st.dataframe(importancias)
 
     fig2, ax2 = plt.subplots(figsize=(10, 5))
+
     ax2.bar(importancias["variable"], importancias["importancia"])
     ax2.set_xlabel("Variable")
     ax2.set_ylabel("Importancia")
@@ -214,7 +268,21 @@ if st.sidebar.button("Entrenar CatBoost"):
 
     resultados = pd.DataFrame({
         "real": y_test.values,
-        "predicho": y_pred
+        "predicho": y_pred,
+        "error": y_test.values - y_pred,
+        "error_absoluto": np.abs(y_test.values - y_pred)
     })
 
     st.dataframe(resultados.head(100))
+
+    csv_resultados = resultados.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        label="Descargar predicciones en CSV",
+        data=csv_resultados,
+        file_name="predicciones_catboost.csv",
+        mime="text/csv"
+    )
+
+else:
+    st.info("Configura las variables en el panel lateral y presiona **Entrenar CatBoost**.")
