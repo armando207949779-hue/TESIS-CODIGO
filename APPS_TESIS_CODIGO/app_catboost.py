@@ -24,7 +24,6 @@ st.write(
 )
 
 
-# Colormap estilo SHAP: azul bajo, violeta medio, rosado alto
 SHAP_CMAP = LinearSegmentedColormap.from_list(
     "shap_blue_pink",
     ["#008BFB", "#7B2CBF", "#FF0051"]
@@ -95,10 +94,6 @@ def seleccionar_variable_interaccion(variable_principal, variables, shap_df):
 
 
 def jitter_beeswarm(x, ancho=0.32, bins=40, seed=42):
-    """
-    Genera jitter vertical tipo beeswarm simple.
-    Agrupa los SHAP values en bins y reparte los puntos alrededor del centro.
-    """
     rng = np.random.default_rng(seed)
     x = np.asarray(x)
 
@@ -579,17 +574,29 @@ if st.sidebar.button("Entrenar CatBoost"):
 
     st.subheader("Gráfico: Real vs Predicho")
 
-    fig, ax = plt.subplots(figsize=(7, 7))
+    fig, ax = plt.subplots(figsize=(8, 7))
 
-    ax.scatter(y_test, y_pred_test, alpha=0.6)
+    ax.scatter(
+        y_test,
+        y_pred_test,
+        alpha=0.65,
+        s=35,
+        edgecolors="none"
+    )
 
     min_val = min(y_test.min(), y_pred_test.min())
     max_val = max(y_test.max(), y_pred_test.max())
 
+    margen = (max_val - min_val) * 0.05
+    min_plot = min_val - margen
+    max_plot = max_val + margen
+
     ax.plot(
-        [min_val, max_val],
-        [min_val, max_val],
-        linestyle="--"
+        [min_plot, max_plot],
+        [min_plot, max_plot],
+        linestyle="--",
+        linewidth=2,
+        label="Predicción perfecta"
     )
 
     texto_metricas = (
@@ -605,12 +612,29 @@ if st.sidebar.button("Entrenar CatBoost"):
         texto_metricas,
         transform=ax.transAxes,
         verticalalignment="top",
-        bbox=dict(boxstyle="round", alpha=0.15)
+        fontsize=11,
+        bbox=dict(
+            boxstyle="round,pad=0.45",
+            facecolor="white",
+            alpha=0.85,
+            edgecolor="lightgray"
+        )
     )
 
-    ax.set_xlabel("Valor real")
-    ax.set_ylabel("Valor predicho")
-    ax.set_title("Real vs Predicho - Test")
+    ax.set_xlim(min_plot, max_plot)
+    ax.set_ylim(min_plot, max_plot)
+
+    ax.set_xlabel("Valor real", fontsize=12)
+    ax.set_ylabel("Valor predicho", fontsize=12)
+    ax.set_title("Real vs Predicho - Test", fontsize=14)
+
+    ax.grid(alpha=0.25)
+    ax.legend(loc="lower right")
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    fig.tight_layout()
 
     st.pyplot(fig)
 
@@ -632,13 +656,15 @@ if st.sidebar.button("Entrenar CatBoost"):
     ax_index.plot(
         resultados_index_plot["index"],
         resultados_index_plot["real"],
-        label="Real"
+        label="Real",
+        linewidth=2
     )
 
     ax_index.plot(
         resultados_index_plot["index"],
         resultados_index_plot["predicho"],
-        label="Predicho"
+        label="Predicho",
+        linewidth=2
     )
 
     ax_index.set_xlabel("Index")
@@ -646,7 +672,13 @@ if st.sidebar.button("Entrenar CatBoost"):
     ax_index.set_title(
         f"Real vs Predicho vs Index - Test | Mostrando {n_index_plot} de {len(resultados)} observaciones"
     )
+    ax_index.grid(alpha=0.25)
     ax_index.legend()
+
+    ax_index.spines["top"].set_visible(False)
+    ax_index.spines["right"].set_visible(False)
+
+    fig_index.tight_layout()
 
     st.pyplot(fig_index)
 
@@ -658,11 +690,17 @@ if st.sidebar.button("Entrenar CatBoost"):
         fig_res_scatter, ax_res_scatter = plt.subplots(figsize=(7, 5))
 
         ax_res_scatter.scatter(y_pred_test, resultados["residuo"], alpha=0.6)
-        ax_res_scatter.axhline(0, linestyle="--")
+        ax_res_scatter.axhline(0, linestyle="--", linewidth=2)
 
         ax_res_scatter.set_xlabel("Valor predicho")
         ax_res_scatter.set_ylabel("Residuo")
         ax_res_scatter.set_title("Residuos vs Predicho - Test")
+
+        ax_res_scatter.grid(alpha=0.25)
+        ax_res_scatter.spines["top"].set_visible(False)
+        ax_res_scatter.spines["right"].set_visible(False)
+
+        fig_res_scatter.tight_layout()
 
         st.pyplot(fig_res_scatter)
 
@@ -674,6 +712,12 @@ if st.sidebar.button("Entrenar CatBoost"):
         ax_res_hist.set_xlabel("Residuo")
         ax_res_hist.set_ylabel("Frecuencia")
         ax_res_hist.set_title("Distribución de residuos - Test")
+
+        ax_res_hist.grid(alpha=0.25)
+        ax_res_hist.spines["top"].set_visible(False)
+        ax_res_hist.spines["right"].set_visible(False)
+
+        fig_res_hist.tight_layout()
 
         st.pyplot(fig_res_hist)
 
@@ -690,15 +734,77 @@ if st.sidebar.button("Entrenar CatBoost"):
         "RMSE validación": valid_rmse
     })
 
-    fig_learning, ax_learning = plt.subplots(figsize=(10, 5))
+    mejor_iteracion = model.get_best_iteration()
 
-    ax_learning.plot(curva["iteracion"], curva["RMSE train"], label="RMSE train")
-    ax_learning.plot(curva["iteracion"], curva["RMSE validación"], label="RMSE validación")
+    if mejor_iteracion is None:
+        mejor_iteracion_plot = len(valid_rmse)
+    else:
+        mejor_iteracion_plot = mejor_iteracion + 1
 
-    ax_learning.set_xlabel("Iteración")
-    ax_learning.set_ylabel("RMSE")
-    ax_learning.set_title("Curva de aprendizaje")
+    mejor_rmse_valid = valid_rmse[mejor_iteracion_plot - 1]
+
+    fig_learning, ax_learning = plt.subplots(figsize=(11, 5.5))
+
+    ax_learning.plot(
+        curva["iteracion"],
+        curva["RMSE train"],
+        label="RMSE train",
+        linewidth=2
+    )
+
+    ax_learning.plot(
+        curva["iteracion"],
+        curva["RMSE validación"],
+        label="RMSE validación",
+        linewidth=2
+    )
+
+    ax_learning.axvline(
+        mejor_iteracion_plot,
+        linestyle="--",
+        linewidth=2,
+        label=f"Mejor iteración: {mejor_iteracion_plot}"
+    )
+
+    ax_learning.scatter(
+        mejor_iteracion_plot,
+        mejor_rmse_valid,
+        s=90,
+        zorder=5
+    )
+
+    y_offset = np.std(valid_rmse) * 0.8
+    if y_offset == 0:
+        y_offset = mejor_rmse_valid * 0.05
+
+    ax_learning.annotate(
+        f"Early stopping\nIteración {mejor_iteracion_plot}\nRMSE valid = {mejor_rmse_valid:.4f}",
+        xy=(mejor_iteracion_plot, mejor_rmse_valid),
+        xytext=(mejor_iteracion_plot, mejor_rmse_valid + y_offset),
+        arrowprops=dict(
+            arrowstyle="->",
+            lw=1.5
+        ),
+        fontsize=10,
+        bbox=dict(
+            boxstyle="round,pad=0.35",
+            facecolor="white",
+            alpha=0.85,
+            edgecolor="lightgray"
+        )
+    )
+
+    ax_learning.set_xlabel("Iteración", fontsize=12)
+    ax_learning.set_ylabel("RMSE", fontsize=12)
+    ax_learning.set_title("Curva de aprendizaje con early stopping", fontsize=14)
+
+    ax_learning.grid(alpha=0.25)
     ax_learning.legend()
+
+    ax_learning.spines["top"].set_visible(False)
+    ax_learning.spines["right"].set_visible(False)
+
+    fig_learning.tight_layout()
 
     st.pyplot(fig_learning)
 
@@ -722,6 +828,12 @@ if st.sidebar.button("Entrenar CatBoost"):
     ax2.set_xlabel("Importancia")
     ax2.set_ylabel("Variable")
     ax2.set_title("Importancia de variables")
+
+    ax2.grid(axis="x", alpha=0.25)
+    ax2.spines["top"].set_visible(False)
+    ax2.spines["right"].set_visible(False)
+
+    fig2.tight_layout()
 
     st.pyplot(fig2)
 
@@ -768,6 +880,12 @@ if st.sidebar.button("Entrenar CatBoost"):
     ax_shap_bar.set_xlabel("Mean |SHAP value|")
     ax_shap_bar.set_ylabel("Variable")
     ax_shap_bar.set_title("Importancia global SHAP")
+
+    ax_shap_bar.grid(axis="x", alpha=0.25)
+    ax_shap_bar.spines["top"].set_visible(False)
+    ax_shap_bar.spines["right"].set_visible(False)
+
+    fig_shap_bar.tight_layout()
 
     st.pyplot(fig_shap_bar)
 
