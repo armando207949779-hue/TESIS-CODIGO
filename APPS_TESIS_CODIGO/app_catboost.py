@@ -6,8 +6,9 @@ from sklearn.datasets import fetch_california_housing
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-from catboost import CatBoostRegressor
+from catboost import CatBoostRegressor, Pool
 import matplotlib.pyplot as plt
+import math
 
 
 st.set_page_config(
@@ -39,6 +40,21 @@ def cargar_archivo(uploaded_file):
         return pd.read_parquet(uploaded_file)
 
     raise ValueError("Formato no soportado. Usa CSV o Parquet.")
+
+
+def calcular_metricas(y_real, y_predicho, nombre_set):
+    mae = mean_absolute_error(y_real, y_predicho)
+    mse = mean_squared_error(y_real, y_predicho)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_real, y_predicho)
+
+    return {
+        "dataset": nombre_set,
+        "R2": r2,
+        "RMSE": rmse,
+        "MAE": mae,
+        "MSE": mse
+    }
 
 
 uploaded_file = st.sidebar.file_uploader(
@@ -143,6 +159,14 @@ early_stopping_rounds = st.sidebar.slider(
     step=10
 )
 
+top_n_shap = st.sidebar.slider(
+    "Top variables para SHAP dependence",
+    min_value=2,
+    max_value=12,
+    value=6,
+    step=1
+)
+
 
 if test_size + valid_size >= 0.90:
     st.error("La suma de test y validación debe dejar suficiente proporción para entrenamiento.")
@@ -185,7 +209,6 @@ cat_features = [
     if str(X[col].dtype) == "category"
 ]
 
-# Separación train / valid / test
 X_temp, X_test, y_temp, y_test = train_test_split(
     X,
     y,
@@ -245,16 +268,30 @@ if st.sidebar.button("Entrenar CatBoost"):
             cat_features=cat_features if len(cat_features) > 0 else None
         )
 
-        y_pred = model.predict(X_test)
+        y_pred_train = model.predict(X_train)
+        y_pred_valid = model.predict(X_valid)
+        y_pred_test = model.predict(X_test)
 
-    mae = mean_absolute_error(y_test, y_pred)
-    mse = mean_squared_error(y_test, y_pred)
-    rmse = np.sqrt(mse)
-    r2 = r2_score(y_test, y_pred)
+    metricas_train = calcular_metricas(y_train, y_pred_train, "Train")
+    metricas_valid = calcular_metricas(y_valid, y_pred_valid, "Validación")
+    metricas_test = calcular_metricas(y_test, y_pred_test, "Test")
+
+    tabla_metricas = pd.DataFrame([
+        metricas_train,
+        metricas_valid,
+        metricas_test
+    ])
+
+    tabla_metricas = tabla_metricas[["dataset", "R2", "RMSE", "MAE", "MSE"]]
+
+    r2 = metricas_test["R2"]
+    rmse = metricas_test["RMSE"]
+    mae = metricas_test["MAE"]
+    mse = metricas_test["MSE"]
 
     st.success("Modelo entrenado correctamente.")
 
-    st.subheader("Métricas en test")
+    st.subheader("Métricas principales en test")
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -263,16 +300,37 @@ if st.sidebar.button("Entrenar CatBoost"):
     col3.metric("MAE", f"{mae:,.4f}")
     col4.metric("MSE", f"{mse:,.4f}")
 
-    st.write(f"**Mejor iteración:** {model.get_best_iteration()}")
+    st.subheader("Tabla de métricas")
+
+    st.dataframe(
+        tabla_metricas.style.format({
+            "R2": "{:.4f}",
+            "RMSE": "{:.4f}",
+            "MAE": "{:.4f}",
+            "MSE": "{:.4f}"
+        }),
+        use_container_width=True
+    )
+
+    mejor_iteracion = model.get_best_iteration()
+
+    st.write(f"**Mejor iteración:** {mejor_iteracion}")
+
+    if mejor_iteracion == iterations - 1:
+        st.info(
+            "La mejor iteración coincide con la última iteración disponible. "
+            "Eso significa que el early stopping no se activó antes del límite máximo. "
+            "Puedes aumentar las iteraciones o ajustar learning rate, depth o early stopping rounds."
+        )
 
     st.subheader("Gráfico: Real vs Predicho")
 
     fig, ax = plt.subplots(figsize=(7, 7))
 
-    ax.scatter(y_test, y_pred, alpha=0.6)
+    ax.scatter(y_test, y_pred_test, alpha=0.6)
 
-    min_val = min(y_test.min(), y_pred.min())
-    max_val = max(y_test.max(), y_pred.max())
+    min_val = min(y_test.min(), y_pred_test.min())
+    max_val = max(y_test.max(), y_pred_test.max())
 
     ax.plot(
         [min_val, max_val],
@@ -298,9 +356,59 @@ if st.sidebar.button("Entrenar CatBoost"):
 
     ax.set_xlabel("Valor real")
     ax.set_ylabel("Valor predicho")
-    ax.set_title("Real vs Predicho")
+    ax.set_title("Real vs Predicho - Test")
 
     st.pyplot(fig)
+
+    st.subheader("Gráfico: Real vs Predicho vs Index")
+
+    resultados = pd.DataFrame({
+        "real": y_test.values,
+        "predicho": y_pred_test,
+        "residuo": y_test.values - y_pred_test,
+        "residuo_absoluto": np.abs(y_test.values - y_pred_test)
+    }).reset_index(drop=True)
+
+    resultados["index"] = resultados.index
+
+    fig_index, ax_index = plt.subplots(figsize=(12, 5))
+
+    ax_index.plot(resultados["index"], resultados["real"], label="Real")
+    ax_index.plot(resultados["index"], resultados["predicho"], label="Predicho")
+
+    ax_index.set_xlabel("Index")
+    ax_index.set_ylabel(target)
+    ax_index.set_title("Real vs Predicho vs Index - Test")
+    ax_index.legend()
+
+    st.pyplot(fig_index)
+
+    st.subheader("Residuos")
+
+    col_res1, col_res2 = st.columns(2)
+
+    with col_res1:
+        fig_res_scatter, ax_res_scatter = plt.subplots(figsize=(7, 5))
+
+        ax_res_scatter.scatter(y_pred_test, resultados["residuo"], alpha=0.6)
+        ax_res_scatter.axhline(0, linestyle="--")
+
+        ax_res_scatter.set_xlabel("Valor predicho")
+        ax_res_scatter.set_ylabel("Residuo")
+        ax_res_scatter.set_title("Residuos vs Predicho - Test")
+
+        st.pyplot(fig_res_scatter)
+
+    with col_res2:
+        fig_res_hist, ax_res_hist = plt.subplots(figsize=(7, 5))
+
+        ax_res_hist.hist(resultados["residuo"], bins=30)
+
+        ax_res_hist.set_xlabel("Residuo")
+        ax_res_hist.set_ylabel("Frecuencia")
+        ax_res_hist.set_title("Distribución de residuos - Test")
+
+        st.pyplot(fig_res_hist)
 
     st.subheader("Curva de aprendizaje")
 
@@ -328,7 +436,7 @@ if st.sidebar.button("Entrenar CatBoost"):
     st.pyplot(fig_learning)
 
     with st.expander("Ver datos de la curva de aprendizaje"):
-        st.dataframe(curva)
+        st.dataframe(curva, use_container_width=True)
 
     st.subheader("Importancia de variables")
 
@@ -337,7 +445,7 @@ if st.sidebar.button("Entrenar CatBoost"):
         "importancia": model.get_feature_importance()
     }).sort_values("importancia", ascending=False)
 
-    st.dataframe(importancias)
+    st.dataframe(importancias, use_container_width=True)
 
     importancias_plot = importancias.sort_values("importancia", ascending=True)
 
@@ -350,16 +458,103 @@ if st.sidebar.button("Entrenar CatBoost"):
 
     st.pyplot(fig2)
 
+    st.subheader("SHAP values")
+
+    with st.spinner("Calculando SHAP values en test..."):
+        test_pool = Pool(
+            X_test,
+            y_test,
+            cat_features=cat_features if len(cat_features) > 0 else None
+        )
+
+        shap_values_full = model.get_feature_importance(
+            test_pool,
+            type="ShapValues"
+        )
+
+    shap_values = shap_values_full[:, :-1]
+    shap_base_value = shap_values_full[:, -1]
+
+    shap_df = pd.DataFrame(
+        shap_values,
+        columns=predictoras
+    )
+
+    shap_importancia = pd.DataFrame({
+        "variable": predictoras,
+        "mean_abs_shap": np.abs(shap_values).mean(axis=0)
+    }).sort_values("mean_abs_shap", ascending=False)
+
+    st.write("**Importancia global basada en SHAP:**")
+
+    st.dataframe(shap_importancia, use_container_width=True)
+
+    shap_plot = shap_importancia.sort_values("mean_abs_shap", ascending=True)
+
+    fig_shap_bar, ax_shap_bar = plt.subplots(
+        figsize=(10, max(5, len(shap_plot) * 0.35))
+    )
+
+    ax_shap_bar.barh(shap_plot["variable"], shap_plot["mean_abs_shap"])
+    ax_shap_bar.set_xlabel("Mean |SHAP value|")
+    ax_shap_bar.set_ylabel("Variable")
+    ax_shap_bar.set_title("Importancia global SHAP")
+
+    st.pyplot(fig_shap_bar)
+
+    with st.expander("Ver SHAP values por observación"):
+        shap_mostrar = shap_df.copy()
+        shap_mostrar["base_value"] = shap_base_value
+        shap_mostrar["predicho"] = y_pred_test
+        shap_mostrar["real"] = y_test.values
+        st.dataframe(shap_mostrar.head(200), use_container_width=True)
+
+    st.subheader("SHAP dependence plots")
+
+    variables_top_shap = shap_importancia["variable"].head(top_n_shap).tolist()
+
+    n_cols = 2
+    n_rows = math.ceil(len(variables_top_shap) / n_cols)
+
+    fig_dep, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(14, max(5, n_rows * 4))
+    )
+
+    if n_rows == 1:
+        axes = np.array([axes])
+
+    axes = axes.flatten()
+
+    for i, variable in enumerate(variables_top_shap):
+        ax_dep = axes[i]
+
+        x_values = X_test[variable]
+        y_values = shap_df[variable]
+
+        if pd.api.types.is_numeric_dtype(x_values):
+            ax_dep.scatter(x_values, y_values, alpha=0.55)
+            ax_dep.set_xlabel(variable)
+        else:
+            x_codes = pd.Categorical(x_values).codes
+            ax_dep.scatter(x_codes, y_values, alpha=0.55)
+            ax_dep.set_xlabel(f"{variable} - códigos categóricos")
+
+        ax_dep.axhline(0, linestyle="--")
+        ax_dep.set_ylabel("SHAP value")
+        ax_dep.set_title(f"SHAP dependence: {variable}")
+
+    for j in range(len(variables_top_shap), len(axes)):
+        axes[j].axis("off")
+
+    fig_dep.tight_layout()
+
+    st.pyplot(fig_dep)
+
     st.subheader("Predicciones en test")
 
-    resultados = pd.DataFrame({
-        "real": y_test.values,
-        "predicho": y_pred,
-        "error": y_test.values - y_pred,
-        "error_absoluto": np.abs(y_test.values - y_pred)
-    })
-
-    st.dataframe(resultados.head(100))
+    st.dataframe(resultados.head(100), use_container_width=True)
 
     csv_resultados = resultados.to_csv(index=False).encode("utf-8")
 
@@ -367,6 +562,24 @@ if st.sidebar.button("Entrenar CatBoost"):
         label="Descargar predicciones en CSV",
         data=csv_resultados,
         file_name="predicciones_catboost.csv",
+        mime="text/csv"
+    )
+
+    csv_metricas = tabla_metricas.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        label="Descargar métricas en CSV",
+        data=csv_metricas,
+        file_name="metricas_catboost.csv",
+        mime="text/csv"
+    )
+
+    csv_shap = shap_df.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        label="Descargar SHAP values en CSV",
+        data=csv_shap,
+        file_name="shap_values_catboost.csv",
         mime="text/csv"
     )
 
