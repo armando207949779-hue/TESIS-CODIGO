@@ -48,9 +48,28 @@ def convertir_a_excel(df):
     return output
 
 
+def preparar_para_parquet(df):
+    df = df.copy()
+
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].astype(str)
+            df[col] = df[col].replace(["nan", "None", "NaT"], "")
+
+    return df
+
+
 def convertir_a_parquet(df):
     output = BytesIO()
-    df.to_parquet(output, index=False, engine="pyarrow")
+
+    df_parquet = preparar_para_parquet(df)
+
+    df_parquet.to_parquet(
+        output,
+        index=False,
+        engine="pyarrow"
+    )
+
     output.seek(0)
     return output
 
@@ -79,8 +98,13 @@ if uploaded_file is not None:
         with col2:
             st.metric("Columnas", df.shape[1])
 
-        st.subheader("Columnas")
-        st.write(list(df.columns))
+        st.subheader("Tipos de datos")
+        st.dataframe(
+            df.dtypes.astype(str).reset_index().rename(
+                columns={"index": "Columna", 0: "Tipo"}
+            ),
+            use_container_width=True
+        )
 
         formato_salida = st.selectbox(
             "Selecciona el formato de salida",
