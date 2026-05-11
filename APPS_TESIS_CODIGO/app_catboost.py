@@ -10,6 +10,12 @@ from catboost import CatBoostRegressor, Pool
 import matplotlib.pyplot as plt
 import math
 
+try:
+    import shap
+    SHAP_DISPONIBLE = True
+except ImportError:
+    SHAP_DISPONIBLE = False
+
 
 st.set_page_config(
     page_title="CatBoost Regressor",
@@ -57,6 +63,16 @@ def calcular_metricas(y_real, y_predicho, nombre_set):
     }
 
 
+def preparar_features_para_shap_plot(X):
+    X_plot = X.copy()
+
+    for col in X_plot.columns:
+        if not pd.api.types.is_numeric_dtype(X_plot[col]):
+            X_plot[col] = pd.Categorical(X_plot[col]).codes
+
+    return X_plot
+
+
 uploaded_file = st.sidebar.file_uploader(
     "Sube tu archivo CSV o Parquet",
     type=["csv", "parquet"]
@@ -99,6 +115,11 @@ predictoras = st.sidebar.multiselect(
     default=predictoras_disponibles
 )
 
+if len(predictoras) == 0:
+    st.warning("Selecciona al menos una variable predictora.")
+    st.stop()
+
+
 st.sidebar.subheader("División de datos")
 
 test_size = st.sidebar.slider(
@@ -116,6 +137,11 @@ valid_size = st.sidebar.slider(
     value=0.20,
     step=0.05
 )
+
+if test_size + valid_size >= 0.90:
+    st.error("La suma de test y validación debe dejar suficiente proporción para entrenamiento.")
+    st.stop()
+
 
 st.sidebar.subheader("Parámetros del modelo")
 
@@ -159,23 +185,16 @@ early_stopping_rounds = st.sidebar.slider(
     step=10
 )
 
+
+st.sidebar.subheader("Opciones de gráficos")
+
 top_n_shap = st.sidebar.slider(
-    "Top variables para SHAP dependence",
-    min_value=2,
-    max_value=12,
-    value=6,
+    "Variables para SHAP dependence plots",
+    min_value=1,
+    max_value=len(predictoras),
+    value=len(predictoras),
     step=1
 )
-
-
-if test_size + valid_size >= 0.90:
-    st.error("La suma de test y validación debe dejar suficiente proporción para entrenamiento.")
-    st.stop()
-
-
-if len(predictoras) == 0:
-    st.warning("Selecciona al menos una variable predictora.")
-    st.stop()
 
 
 df_model = df[[target] + predictoras].copy()
@@ -224,6 +243,20 @@ X_train, X_valid, y_train, y_valid = train_test_split(
     test_size=valid_relative_size,
     random_state=int(random_state)
 )
+
+
+max_test_index = X_test.shape[0]
+
+if max_test_index <= 20:
+    n_index_plot = max_test_index
+else:
+    n_index_plot = st.sidebar.slider(
+        "Observaciones para Real vs Predicho vs Index",
+        min_value=20,
+        max_value=max_test_index,
+        value=min(200, max_test_index),
+        step=10
+    )
 
 
 st.subheader("Configuración seleccionada")
@@ -371,14 +404,27 @@ if st.sidebar.button("Entrenar CatBoost"):
 
     resultados["index"] = resultados.index
 
+    resultados_index_plot = resultados.head(n_index_plot)
+
     fig_index, ax_index = plt.subplots(figsize=(12, 5))
 
-    ax_index.plot(resultados["index"], resultados["real"], label="Real")
-    ax_index.plot(resultados["index"], resultados["predicho"], label="Predicho")
+    ax_index.plot(
+        resultados_index_plot["index"],
+        resultados_index_plot["real"],
+        label="Real"
+    )
+
+    ax_index.plot(
+        resultados_index_plot["index"],
+        resultados_index_plot["predicho"],
+        label="Predicho"
+    )
 
     ax_index.set_xlabel("Index")
     ax_index.set_ylabel(target)
-    ax_index.set_title("Real vs Predicho vs Index - Test")
+    ax_index.set_title(
+        f"Real vs Predicho vs Index - Test | Mostrando {n_index_plot} de {len(resultados)} observaciones"
+    )
     ax_index.legend()
 
     st.pyplot(fig_index)
@@ -501,6 +547,31 @@ if st.sidebar.button("Entrenar CatBoost"):
     ax_shap_bar.set_title("Importancia global SHAP")
 
     st.pyplot(fig_shap_bar)
+
+    st.subheader("SHAP summary plot")
+
+    if SHAP_DISPONIBLE:
+        X_test_shap_plot = preparar_features_para_shap_plot(X_test)
+
+        fig_shap_summary = plt.figure(figsize=(12, max(6, len(predictoras) * 0.45)))
+
+        shap.summary_plot(
+            shap_values,
+            X_test_shap_plot,
+            feature_names=predictoras,
+            show=False,
+            max_display=len(predictoras)
+        )
+
+        plt.title("SHAP summary plot - Test")
+        st.pyplot(fig_shap_summary)
+        plt.close(fig_shap_summary)
+
+    else:
+        st.warning(
+            "No se pudo cargar la librería shap. "
+            "Agrega shap al requirements.txt para mostrar el SHAP summary plot."
+        )
 
     with st.expander("Ver SHAP values por observación"):
         shap_mostrar = shap_df.copy()
