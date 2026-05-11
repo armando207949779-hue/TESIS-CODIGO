@@ -8,6 +8,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from catboost import CatBoostRegressor, Pool
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 import math
 
 
@@ -20,6 +21,13 @@ st.title("CatBoost Regressor")
 st.write(
     "Sube un archivo CSV o Parquet, elige la variable target, selecciona predictores "
     "y entrena un modelo CatBoost de regresión."
+)
+
+
+# Colormap estilo SHAP: azul bajo, violeta medio, rosado alto
+SHAP_CMAP = LinearSegmentedColormap.from_list(
+    "shap_blue_pink",
+    ["#008BFB", "#7B2CBF", "#FF0051"]
 )
 
 
@@ -59,7 +67,6 @@ def calcular_metricas(y_real, y_predicho, nombre_set):
 
 def convertir_categoricas_a_codigos(X):
     X_plot = X.copy()
-
     mapas_categorias = {}
 
     for col in X_plot.columns:
@@ -87,6 +94,119 @@ def seleccionar_variable_interaccion(variable_principal, variables, shap_df):
     return importancia_shap.index[0]
 
 
+def jitter_beeswarm(x, ancho=0.32, bins=40, seed=42):
+    """
+    Genera jitter vertical tipo beeswarm simple.
+    Agrupa los SHAP values en bins y reparte los puntos alrededor del centro.
+    """
+    rng = np.random.default_rng(seed)
+    x = np.asarray(x)
+
+    if len(x) == 0:
+        return np.array([])
+
+    if np.nanmax(x) == np.nanmin(x):
+        return rng.normal(0, ancho / 5, size=len(x))
+
+    bins_edges = np.linspace(np.nanmin(x), np.nanmax(x), bins + 1)
+    bin_id = np.digitize(x, bins_edges) - 1
+
+    jitter = np.zeros(len(x))
+
+    for b in np.unique(bin_id):
+        idx = np.where(bin_id == b)[0]
+        n = len(idx)
+
+        if n <= 1:
+            jitter[idx] = 0
+        else:
+            posiciones = np.linspace(-ancho, ancho, n)
+            rng.shuffle(posiciones)
+            jitter[idx] = posiciones
+
+    jitter += rng.normal(0, ancho * 0.04, size=len(x))
+
+    return jitter
+
+
+def shap_summary_plot_estilo(
+    shap_df,
+    X_plot,
+    shap_importancia,
+    max_display,
+    titulo="SHAP summary plot - Test"
+):
+    variables = shap_importancia["variable"].head(max_display).tolist()
+    variables_reverso = list(reversed(variables))
+
+    fig, ax = plt.subplots(
+        figsize=(11, max(5, len(variables) * 0.55))
+    )
+
+    ultimo_scatter = None
+
+    for i, variable in enumerate(variables_reverso):
+        valores_shap = shap_df[variable].values
+        valores_feature = X_plot[variable].values
+
+        y_base = np.full(len(valores_shap), i)
+        y_jitter = y_base + jitter_beeswarm(
+            valores_shap,
+            ancho=0.28,
+            bins=35,
+            seed=100 + i
+        )
+
+        ultimo_scatter = ax.scatter(
+            valores_shap,
+            y_jitter,
+            c=valores_feature,
+            cmap=SHAP_CMAP,
+            s=16,
+            alpha=0.85,
+            linewidths=0
+        )
+
+    ax.axvline(0, color="gray", linewidth=1.5)
+
+    ax.set_yticks(range(len(variables_reverso)))
+    ax.set_yticklabels(variables_reverso, fontsize=12)
+
+    ax.set_xlabel("SHAP value (impact on model output)", fontsize=13)
+    ax.set_ylabel("")
+    ax.set_title(titulo, fontsize=14)
+
+    ax.grid(axis="y", linestyle=":", alpha=0.35)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+
+    cbar = fig.colorbar(ultimo_scatter, ax=ax, pad=0.02)
+    cbar.set_label("Feature value", rotation=270, labelpad=18, fontsize=12)
+    cbar.set_ticks([])
+    cbar.ax.text(
+        1.8,
+        1.00,
+        "High",
+        transform=cbar.ax.transAxes,
+        ha="left",
+        va="center",
+        fontsize=11
+    )
+    cbar.ax.text(
+        1.8,
+        0.00,
+        "Low",
+        transform=cbar.ax.transAxes,
+        ha="left",
+        va="center",
+        fontsize=11
+    )
+
+    fig.tight_layout()
+    return fig
+
+
 def dependence_plot_estilo_shap(
     ax,
     X_original,
@@ -100,41 +220,68 @@ def dependence_plot_estilo_shap(
     y = shap_df[variable_principal].values
     c = X_plot[variable_color].values
 
-    ruido = np.random.normal(0, 0.015, size=len(x))
+    rng = np.random.default_rng(123)
 
     if pd.api.types.is_numeric_dtype(X_original[variable_principal]):
         x_plot = x
     else:
-        x_plot = x + ruido
+        x_plot = x + rng.normal(0, 0.05, size=len(x))
 
     scatter = ax.scatter(
         x_plot,
         y,
         c=c,
-        cmap="cool",
-        alpha=0.75,
-        s=18
+        cmap=SHAP_CMAP,
+        alpha=0.85,
+        s=18,
+        linewidths=0
     )
 
-    ax.axhline(0, linestyle="--", linewidth=1)
-    ax.set_xlabel(variable_principal)
-    ax.set_ylabel(f"SHAP value for\n{variable_principal}")
-    ax.set_title(f"{variable_principal} coloreado por {variable_color}")
+    ax.axhline(0, color="gray", linestyle="--", linewidth=1)
+    ax.set_xlabel(variable_principal, fontsize=12)
+    ax.set_ylabel(f"SHAP value for\n{variable_principal}", fontsize=12)
+    ax.set_title(
+        f"{variable_principal} coloreado por {variable_color}",
+        fontsize=13
+    )
+
+    ax.grid(alpha=0.20)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
 
     if variable_principal in mapas_categorias:
         categorias_x = mapas_categorias[variable_principal]
         ax.set_xticks(range(len(categorias_x)))
         ax.set_xticklabels(categorias_x, rotation=45, ha="right")
 
-    cbar = plt.colorbar(scatter, ax=ax)
+    cbar = plt.colorbar(scatter, ax=ax, pad=0.02)
 
     if variable_color in mapas_categorias:
         categorias_color = mapas_categorias[variable_color]
         ticks = list(range(len(categorias_color)))
         cbar.set_ticks(ticks)
         cbar.set_ticklabels(categorias_color)
-
-    cbar.set_label(variable_color)
+        cbar.set_label(variable_color, rotation=270, labelpad=18)
+    else:
+        cbar.set_label(variable_color, rotation=270, labelpad=18)
+        cbar.ax.text(
+            1.8,
+            1.00,
+            "High",
+            transform=cbar.ax.transAxes,
+            ha="left",
+            va="center",
+            fontsize=10
+        )
+        cbar.ax.text(
+            1.8,
+            0.00,
+            "Low",
+            transform=cbar.ax.transAxes,
+            ha="left",
+            va="center",
+            fontsize=10
+        )
 
     return ax
 
@@ -256,6 +403,14 @@ st.sidebar.subheader("Opciones de gráficos")
 
 top_n_shap = st.sidebar.slider(
     "Variables para SHAP dependence plots",
+    min_value=1,
+    max_value=len(predictoras),
+    value=len(predictoras),
+    step=1
+)
+
+max_display_summary = st.sidebar.slider(
+    "Variables para SHAP summary plot",
     min_value=1,
     max_value=len(predictoras),
     value=len(predictoras),
@@ -592,6 +747,8 @@ if st.sidebar.button("Entrenar CatBoost"):
         columns=predictoras
     )
 
+    X_test_plot, mapas_categorias = convertir_categoricas_a_codigos(X_test)
+
     shap_importancia = pd.DataFrame({
         "variable": predictoras,
         "mean_abs_shap": np.abs(shap_values).mean(axis=0)
@@ -616,46 +773,13 @@ if st.sidebar.button("Entrenar CatBoost"):
 
     st.subheader("SHAP summary plot")
 
-    X_test_plot, mapas_categorias = convertir_categoricas_a_codigos(X_test)
-
-    orden_shap = shap_importancia["variable"].tolist()
-
-    fig_shap_summary, ax_shap_summary = plt.subplots(
-        figsize=(12, max(6, len(orden_shap) * 0.45))
+    fig_shap_summary = shap_summary_plot_estilo(
+        shap_df=shap_df,
+        X_plot=X_test_plot,
+        shap_importancia=shap_importancia,
+        max_display=max_display_summary,
+        titulo="SHAP summary plot - Test"
     )
-
-    ultimo_scatter = None
-
-    for i, variable in enumerate(reversed(orden_shap)):
-        valores_feature = X_test_plot[variable].values
-        valores_shap = shap_df[variable].values
-
-        y_jitter = np.random.normal(
-            loc=i,
-            scale=0.08,
-            size=len(valores_shap)
-        )
-
-        ultimo_scatter = ax_shap_summary.scatter(
-            valores_shap,
-            y_jitter,
-            c=valores_feature,
-            cmap="cool",
-            alpha=0.65,
-            s=18
-        )
-
-    ax_shap_summary.axvline(0, linestyle="--")
-    ax_shap_summary.set_yticks(range(len(orden_shap)))
-    ax_shap_summary.set_yticklabels(list(reversed(orden_shap)))
-    ax_shap_summary.set_xlabel("SHAP value")
-    ax_shap_summary.set_ylabel("Variable")
-    ax_shap_summary.set_title("SHAP summary plot - Test")
-
-    cbar = fig_shap_summary.colorbar(ultimo_scatter, ax=ax_shap_summary)
-    cbar.set_label("Valor de la variable")
-
-    fig_shap_summary.tight_layout()
 
     st.pyplot(fig_shap_summary)
 
