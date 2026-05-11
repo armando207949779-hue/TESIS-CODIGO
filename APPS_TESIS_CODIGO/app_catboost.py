@@ -26,7 +26,14 @@ from matplotlib.colors import LinearSegmentedColormap
 from sklearn import __version__ as sklearn_version
 from sklearn.datasets import fetch_california_housing
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold, train_test_split
+
+try:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    OPTUNA_AVAILABLE = True
+except ImportError:
+    OPTUNA_AVAILABLE = False
 
 
 # ======================================================================
@@ -266,6 +273,7 @@ numpy>=1.23
 pandas>=1.5
 scipy>=1.10
 scikit-learn>=1.2
+optuna>=3.0
 """
 
 README_MD = """# CatBoost model export
@@ -652,6 +660,229 @@ def exportar_modelo_a_zip(
 
 
 # ======================================================================
+# 5b. ENTRENAMIENTO REUSABLE (usado por el botón manual y por Optuna)
+# ======================================================================
+
+def entrenar_y_guardar(hiperparametros, X_train, y_train, X_valid, y_valid,
+                       X_test, y_test, X, predictoras, cat_features, target):
+    """Entrena CatBoost, calcula métricas y guarda todo en session_state."""
+    model = CatBoostRegressor(
+        **hiperparametros,
+        use_best_model=True,
+        verbose=False,
+    )
+    model.fit(
+        X_train, y_train,
+        eval_set=(X_valid, y_valid),
+        cat_features=cat_features if cat_features else None,
+    )
+
+    y_pred_train = model.predict(X_train)
+    y_pred_valid = model.predict(X_valid)
+    y_pred_test = model.predict(X_test)
+
+    tabla_metricas = pd.DataFrame([
+        calcular_metricas(y_train, y_pred_train, "Train"),
+        calcular_metricas(y_valid, y_pred_valid, "Validación"),
+        calcular_metricas(y_test, y_pred_test, "Test"),
+    ])[["dataset", "R2", "RMSE", "MAE", "MSE"]]
+
+    importancias = pd.DataFrame({
+        "variable": X.columns,
+        "importancia": model.get_feature_importance(),
+    }).sort_values("importancia", ascending=False).reset_index(drop=True)
+
+    evals_result = model.get_evals_result()
+    curva = pd.DataFrame({
+        "iteracion": np.arange(1, len(evals_result["learn"]["RMSE"]) + 1),
+        "RMSE train": evals_result["learn"]["RMSE"],
+        "RMSE validación": evals_result["validation"]["RMSE"],
+    })
+
+    resultados = pd.DataFrame({
+        "real":             y_test.values,
+        "predicho":         y_pred_test,
+        "residuo":          y_test.values - y_pred_test,
+        "residuo_absoluto": np.abs(y_test.values - y_pred_test),
+    }).reset_index(drop=True)
+    resultados["index"] = resultados.index
+
+    st.session_state.entrenado = True
+    st.session_state.shap_calculado = False
+    st.session_state.model = model
+    st.session_state.X_train = X_train
+    st.session_state.y_train = y_train
+    st.session_state.X_test = X_test
+    st.session_state.y_test = y_test
+    st.session_state.y_pred_test = y_pred_test
+    st.session_state.predictoras = predictoras
+    st.session_state.cat_features = cat_features
+    st.session_state.target = target
+    st.session_state.hiperparametros = hiperparametros
+    st.session_state.tabla_metricas = tabla_metricas
+    st.session_state.importancias = importancias
+    st.session_state.curva = curva
+    st.session_state.resultados = resultados
+
+    return model, tabla_metricas
+
+
+# ======================================================================
+# 5c. OPTUNA: BÚSQUEDA AUTOMÁTICA DE HIPERPARÁMETROS
+# ======================================================================
+
+def correr_optuna(X_train, y_train, X_valid, y_valid, cat_features,
+                  n_trials, seed, progress_callback=None):
+    """Búsqueda Optuna minimizando RMSE en validación.
+
+    El espacio de búsqueda usa rangos pensados para ser robustos al overfit en
+    cualquier dataset, alineados con los defaults de los sliders.
+    """
+
+    def objective(trial):
+        params = {
+            "iterations":          trial.suggest_int("iterations", 500, 3000, step=100),
+            "learning_rate":       trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
+            "depth":               trial.suggest_int("depth", 3, 8),
+            "l2_leaf_reg":         trial.suggest_float("l2_leaf_reg", 1.0, 20.0, log=True),
+            "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 2.0),
+            "random_strength":     trial.suggest_float("random_strength", 0.0, 10.0),
+            "min_data_in_leaf":    trial.suggest_int("min_data_in_leaf", 1, 30),
+        }
+        m = CatBoostRegressor(
+            **params,
+            early_stopping_rounds=50,
+            random_seed=int(seed),
+            loss_function="RMSE",
+            eval_metric="RMSE",
+            use_best_model=True,
+            verbose=False,
+        )
+        m.fit(
+            X_train, y_train,
+            eval_set=(X_valid, y_valid),
+            cat_features=cat_features if cat_features else None,
+        )
+        pred = m.predict(X_valid)
+        return float(np.sqrt(mean_squared_error(y_valid, pred)))
+
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=int(seed)),
+    )
+    callbacks = [progress_callback] if progress_callback is not None else None
+    study.optimize(
+        objective,
+        n_trials=int(n_trials),
+        callbacks=callbacks,
+        show_progress_bar=False,
+    )
+    return study
+
+
+def calcular_mejora_porcentual(baseline_metricas: dict,
+                               optimizado_metricas: dict) -> dict:
+    """% de mejora por métrica (positivo siempre = mejor)."""
+    mejoras = {}
+    for k in ["R2", "RMSE", "MAE", "MSE"]:
+        b = baseline_metricas[k]
+        o = optimizado_metricas[k]
+        denom = max(abs(b), 1e-6)
+        if k == "R2":
+            mejoras[k] = (o - b) / denom * 100  # mayor es mejor
+        else:
+            mejoras[k] = (b - o) / denom * 100  # menor es mejor
+    return mejoras
+
+
+def plot_optuna_history(study):
+    values = [t.value for t in study.trials if t.value is not None]
+    if not values:
+        return None
+    fig, ax = plt.subplots(figsize=(11, 5))
+    x = np.arange(1, len(values) + 1)
+    running_best = np.minimum.accumulate(values)
+    ax.scatter(x, values, alpha=0.55, s=40, color=COLORS["primary"],
+               label="Trial", edgecolors="none")
+    ax.plot(x, running_best, linewidth=2.5, color=COLORS["secondary"],
+            label="Mejor RMSE acumulado")
+    ax.set_xlabel("Trial")
+    ax.set_ylabel("RMSE validación")
+    ax.set_title("Historial de búsqueda (Optuna)")
+    ax.grid(alpha=0.35)
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def plot_optuna_param_importance(study):
+    try:
+        importances = optuna.importance.get_param_importances(study)
+    except Exception:
+        return None
+    df = pd.DataFrame({
+        "parametro":   list(importances.keys()),
+        "importancia": list(importances.values()),
+    }).sort_values("importancia", ascending=True)
+    fig, ax = plt.subplots(figsize=(10, max(4, len(df) * 0.45)))
+    ax.barh(df["parametro"], df["importancia"], color=COLORS["tertiary"])
+    ax.set_xlabel("Importancia relativa")
+    ax.set_title("Importancia de hiperparámetros (Optuna)")
+    ax.grid(axis="x", alpha=0.35)
+    fig.tight_layout()
+    return fig
+
+
+# ======================================================================
+# 5d. K-FOLD CROSS-VALIDATION
+# ======================================================================
+
+def cross_validation_kfold(X, y, cat_features, params,
+                           n_splits=5, seed=42, progress=None):
+    """K-fold CV con los hiperparámetros indicados. Retorna métricas por fold."""
+    kf = KFold(n_splits=int(n_splits), shuffle=True, random_state=int(seed))
+    rows = []
+    for fold_idx, (tr_idx, val_idx) in enumerate(kf.split(X), start=1):
+        X_tr, X_val = X.iloc[tr_idx], X.iloc[val_idx]
+        y_tr, y_val = y.iloc[tr_idx], y.iloc[val_idx]
+        model_cv = CatBoostRegressor(**params, verbose=False)
+        model_cv.fit(X_tr, y_tr,
+                     cat_features=cat_features if cat_features else None)
+        pred = model_cv.predict(X_val)
+        rows.append(calcular_metricas(y_val, pred, f"Fold {fold_idx}"))
+        if progress is not None:
+            progress(fold_idx, n_splits)
+    return pd.DataFrame(rows)
+
+
+def plot_kfold_resultados(cv_df, metric="R2"):
+    fig, ax = plt.subplots(figsize=(10, 5))
+    folds = cv_df["dataset"]
+    values = cv_df[metric]
+    mean_val = values.mean()
+    std_val = values.std()
+
+    bars = ax.bar(folds, values, color=COLORS["primary"],
+                  edgecolor="white", linewidth=1.5)
+    ax.axhspan(mean_val - std_val, mean_val + std_val,
+               color=COLORS["secondary"], alpha=0.12,
+               label=f"±1 std = {std_val:.4f}")
+    ax.axhline(mean_val, linestyle="--", color=COLORS["secondary"],
+               linewidth=2, label=f"Media = {mean_val:.4f}")
+    for bar, v in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                bar.get_height(), f"{v:.3f}",
+                ha="center", va="bottom", fontsize=10)
+    ax.set_xlabel("Fold")
+    ax.set_ylabel(metric)
+    ax.set_title(f"{metric} por fold (K-fold CV)")
+    ax.grid(axis="y", alpha=0.35)
+    ax.legend(loc="lower right")
+    fig.tight_layout()
+    return fig
+
+
+# ======================================================================
 # 6. SIDEBAR: CARGA, TARGET, PREDICTORES, HIPERPARÁMETROS
 # ======================================================================
 
@@ -816,6 +1047,42 @@ with st.sidebar:
         1, len(predictoras), len(predictoras), 1,
     )
 
+    st.header("6. Herramientas avanzadas (opcional)")
+
+    with st.expander("🎯 Tuning con Optuna"):
+        if not OPTUNA_AVAILABLE:
+            st.warning("Optuna no está instalado.\n\n`pip install optuna`")
+            n_trials = 0
+            run_optuna = False
+        else:
+            st.caption(
+                "Busca automáticamente la mejor combinación de hiperparámetros "
+                "minimizando RMSE en validación. Reentrena el modelo con los "
+                "mejores parámetros y muestra la **mejora porcentual** vs. la "
+                "configuración actual de los sliders."
+            )
+            n_trials = st.slider(
+                "Número de trials", 10, 200, 30, 5,
+                help="Más trials = búsqueda más exhaustiva, pero más tiempo. "
+                     "30-50 suele bastar para datasets medianos.",
+            )
+            run_optuna = st.button("Buscar con Optuna",
+                                   use_container_width=True)
+
+    with st.expander("🔁 Cross-validation K-fold"):
+        st.caption(
+            "Estima la **robustez** del modelo entrenando K modelos en "
+            "particiones disjuntas. Reporta media ± std por métrica. "
+            "Requiere haber entrenado al menos un modelo (reutiliza sus "
+            "hiperparámetros)."
+        )
+        n_splits = st.slider(
+            "Número de folds (K)", 3, 10, 5, 1,
+            help="K=5 es estándar. K=10 es más robusto pero ~2x más lento.",
+        )
+        run_kfold = st.button("Ejecutar K-fold CV",
+                              use_container_width=True)
+
 
 # ======================================================================
 # 7. PREPARACIÓN DE DATOS Y VALIDACIONES
@@ -893,95 +1160,186 @@ with st.expander("Ver variables y stats"):
 
 
 # ======================================================================
-# 8. ENTRENAMIENTO (guarda todo en session_state)
+# 8. ENTRENAMIENTO (manual, Optuna y K-fold)
 # ======================================================================
 
 entrenar = st.sidebar.button("🚀 Entrenar CatBoost", type="primary",
                              use_container_width=True)
 
+# ---- 8a. Entrenamiento manual ----
 if entrenar:
     try:
+        hiperparametros = {
+            "iterations":            int(iterations),
+            "learning_rate":         float(learning_rate),
+            "depth":                 int(depth),
+            "l2_leaf_reg":           float(l2_leaf_reg),
+            "bagging_temperature":   float(bagging_temperature),
+            "random_strength":       float(random_strength),
+            "min_data_in_leaf":      int(min_data_in_leaf),
+            "early_stopping_rounds": int(early_stopping_rounds),
+            "random_seed":           int(random_state),
+            "loss_function":         "RMSE",
+            "eval_metric":           "RMSE",
+        }
         with st.spinner("Entrenando modelo CatBoost..."):
-            hiperparametros = {
-                "iterations":            int(iterations),
-                "learning_rate":         float(learning_rate),
-                "depth":                 int(depth),
-                "l2_leaf_reg":           float(l2_leaf_reg),
-                "bagging_temperature":   float(bagging_temperature),
-                "random_strength":       float(random_strength),
-                "min_data_in_leaf":      int(min_data_in_leaf),
-                "early_stopping_rounds": int(early_stopping_rounds),
-                "random_seed":           int(random_state),
-                "loss_function":         "RMSE",
-                "eval_metric":           "RMSE",
-            }
-
-            model = CatBoostRegressor(
-                **hiperparametros,
-                use_best_model=True,
-                verbose=False,
+            entrenar_y_guardar(
+                hiperparametros,
+                X_train, y_train, X_valid, y_valid,
+                X_test, y_test, X, predictoras, cat_features, target,
             )
-            model.fit(
+        # Limpiar resultados de Optuna previos (este es un train manual)
+        for k in ["optuna_run", "optuna_baseline_metrics",
+                  "optuna_optimized_metrics", "optuna_mejoras",
+                  "optuna_best_params", "optuna_study", "optuna_n_trials"]:
+            st.session_state.pop(k, None)
+    except Exception as e:
+        st.error(f"Error durante el entrenamiento: {e}")
+        st.exception(e)
+
+# ---- 8b. Optuna: tuning automático ----
+if OPTUNA_AVAILABLE and run_optuna:
+    try:
+        # 1) Baseline con los sliders actuales
+        baseline_params = {
+            "iterations":            int(iterations),
+            "learning_rate":         float(learning_rate),
+            "depth":                 int(depth),
+            "l2_leaf_reg":           float(l2_leaf_reg),
+            "bagging_temperature":   float(bagging_temperature),
+            "random_strength":       float(random_strength),
+            "min_data_in_leaf":      int(min_data_in_leaf),
+            "early_stopping_rounds": int(early_stopping_rounds),
+            "random_seed":           int(random_state),
+            "loss_function":         "RMSE",
+            "eval_metric":           "RMSE",
+        }
+        with st.spinner("Entrenando baseline con la configuración actual..."):
+            baseline_model = CatBoostRegressor(
+                **baseline_params, use_best_model=True, verbose=False,
+            )
+            baseline_model.fit(
                 X_train, y_train,
                 eval_set=(X_valid, y_valid),
                 cat_features=cat_features if cat_features else None,
             )
+            baseline_pred = baseline_model.predict(X_test)
+            baseline_metrics = calcular_metricas(y_test, baseline_pred, "Baseline")
 
-            y_pred_train = model.predict(X_train)
-            y_pred_valid = model.predict(X_valid)
-            y_pred_test = model.predict(X_test)
+        # 2) Búsqueda Optuna
+        st.info(f"Ejecutando {n_trials} trials con Optuna...")
+        progress_bar = st.progress(0.0)
+        status_text = st.empty()
 
-        # Métricas
-        metricas_train = calcular_metricas(y_train, y_pred_train, "Train")
-        metricas_valid = calcular_metricas(y_valid, y_pred_valid, "Validación")
-        metricas_test = calcular_metricas(y_test, y_pred_test, "Test")
-        tabla_metricas = pd.DataFrame([metricas_train, metricas_valid, metricas_test])
-        tabla_metricas = tabla_metricas[["dataset", "R2", "RMSE", "MAE", "MSE"]]
+        def optuna_callback(study, trial):
+            done = len(study.trials)
+            progress_bar.progress(min(done / float(n_trials), 1.0))
+            best = study.best_value if study.best_value is not None else float("inf")
+            status_text.text(
+                f"Trial {done}/{n_trials} · Mejor RMSE (val) = {best:.4f}"
+            )
 
-        # Importancias
-        importancias = pd.DataFrame({
-            "variable": X.columns,
-            "importancia": model.get_feature_importance(),
-        }).sort_values("importancia", ascending=False).reset_index(drop=True)
+        study = correr_optuna(
+            X_train, y_train, X_valid, y_valid,
+            cat_features, n_trials, random_state,
+            progress_callback=optuna_callback,
+        )
+        progress_bar.empty()
+        status_text.empty()
 
-        # Curva de aprendizaje
-        evals_result = model.get_evals_result()
-        curva = pd.DataFrame({
-            "iteracion": np.arange(1, len(evals_result["learn"]["RMSE"]) + 1),
-            "RMSE train": evals_result["learn"]["RMSE"],
-            "RMSE validación": evals_result["validation"]["RMSE"],
+        # 3) Reentrenar con mejores params
+        best_params = dict(study.best_params)
+        best_params.update({
+            "early_stopping_rounds": 50,
+            "random_seed":           int(random_state),
+            "loss_function":         "RMSE",
+            "eval_metric":           "RMSE",
         })
+        with st.spinner("Reentrenando con los mejores hiperparámetros..."):
+            entrenar_y_guardar(
+                best_params,
+                X_train, y_train, X_valid, y_valid,
+                X_test, y_test, X, predictoras, cat_features, target,
+            )
 
-        # Resultados test
-        resultados = pd.DataFrame({
-            "real":             y_test.values,
-            "predicho":         y_pred_test,
-            "residuo":          y_test.values - y_pred_test,
-            "residuo_absoluto": np.abs(y_test.values - y_pred_test),
-        }).reset_index(drop=True)
-        resultados["index"] = resultados.index
+        # 4) Comparar baseline vs optimizado
+        optimized_row = (
+            st.session_state.tabla_metricas
+            .query("dataset == 'Test'")
+            .iloc[0]
+            .to_dict()
+        )
+        mejoras = calcular_mejora_porcentual(baseline_metrics, optimized_row)
 
-        # Guardar todo en session_state
-        st.session_state.entrenado = True
-        st.session_state.shap_calculado = False
-        st.session_state.model = model
-        st.session_state.X_train = X_train
-        st.session_state.y_train = y_train
-        st.session_state.X_test = X_test
-        st.session_state.y_test = y_test
-        st.session_state.y_pred_test = y_pred_test
-        st.session_state.predictoras = predictoras
-        st.session_state.cat_features = cat_features
-        st.session_state.target = target
-        st.session_state.hiperparametros = hiperparametros
-        st.session_state.tabla_metricas = tabla_metricas
-        st.session_state.importancias = importancias
-        st.session_state.curva = curva
-        st.session_state.resultados = resultados
+        st.session_state.optuna_run = True
+        st.session_state.optuna_baseline_metrics = baseline_metrics
+        st.session_state.optuna_optimized_metrics = optimized_row
+        st.session_state.optuna_mejoras = mejoras
+        st.session_state.optuna_best_params = best_params
+        st.session_state.optuna_study = study
+        st.session_state.optuna_n_trials = int(n_trials)
 
+        st.success("Optuna terminó. Modelo actualizado con los mejores hiperparámetros.")
     except Exception as e:
-        st.error(f"Error durante el entrenamiento: {e}")
+        st.error(f"Error durante la búsqueda con Optuna: {e}")
         st.exception(e)
+
+# ---- 8c. K-fold cross-validation ----
+if run_kfold:
+    if not st.session_state.entrenado:
+        st.warning("Primero entrena un modelo (manualmente o con Optuna) "
+                   "antes de correr K-fold CV.")
+    else:
+        try:
+            hp = st.session_state.hiperparametros
+            # En CV usamos iteraciones fijas (las que early stopping eligió)
+            # y omitimos early_stopping_rounds porque no hay valid set interno.
+            params_cv = {
+                "iterations":          int(st.session_state.model.tree_count_),
+                "learning_rate":       hp["learning_rate"],
+                "depth":               hp["depth"],
+                "l2_leaf_reg":         hp["l2_leaf_reg"],
+                "bagging_temperature": hp["bagging_temperature"],
+                "random_strength":     hp["random_strength"],
+                "min_data_in_leaf":    hp["min_data_in_leaf"],
+                "random_seed":         hp["random_seed"],
+                "loss_function":       "RMSE",
+                "eval_metric":         "RMSE",
+            }
+
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+
+            def kfold_callback(fold_idx, total):
+                progress_bar.progress(fold_idx / float(total))
+                status_text.text(f"Entrenando fold {fold_idx}/{total}...")
+
+            with st.spinner(f"Ejecutando {n_splits}-fold CV..."):
+                cv_df = cross_validation_kfold(
+                    X, y, cat_features, params_cv,
+                    n_splits=n_splits, seed=hp["random_seed"],
+                    progress=kfold_callback,
+                )
+
+            progress_bar.empty()
+            status_text.empty()
+
+            resumen = pd.DataFrame({
+                "metrica": ["R2", "RMSE", "MAE", "MSE"],
+                "media":   [cv_df[m].mean() for m in ["R2", "RMSE", "MAE", "MSE"]],
+                "std":     [cv_df[m].std()  for m in ["R2", "RMSE", "MAE", "MSE"]],
+                "min":     [cv_df[m].min()  for m in ["R2", "RMSE", "MAE", "MSE"]],
+                "max":     [cv_df[m].max()  for m in ["R2", "RMSE", "MAE", "MSE"]],
+            })
+
+            st.session_state.kfold_run = True
+            st.session_state.kfold_df = cv_df
+            st.session_state.kfold_resumen = resumen
+            st.session_state.kfold_n_splits = int(n_splits)
+            st.success(f"K-fold CV terminado ({n_splits} folds).")
+        except Exception as e:
+            st.error(f"Error en K-fold CV: {e}")
+            st.exception(e)
 
 
 # ======================================================================
@@ -1046,6 +1404,107 @@ if mejor_iteracion is not None and mejor_iteracion >= hiperparametros["iteration
         "La mejor iteración coincide con el máximo: early stopping no se activó. "
         "Considera aumentar `iterations` o ajustar `learning_rate`."
     )
+
+
+# ----- Optuna: comparación baseline vs optimizado -----
+if st.session_state.get("optuna_run", False):
+    st.subheader("🎯 Mejora con Optuna")
+
+    baseline = st.session_state.optuna_baseline_metrics
+    optimized = st.session_state.optuna_optimized_metrics
+    mejoras = st.session_state.optuna_mejoras
+
+    st.caption(
+        f"Comparación de métricas en **test**: configuración inicial de los "
+        f"sliders vs. mejores hiperparámetros encontrados tras "
+        f"{st.session_state.optuna_n_trials} trials. Δ% positivo = mejora."
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("R²",  f"{optimized['R2']:.4f}",   f"{mejoras['R2']:+.2f}%")
+    c2.metric("RMSE", f"{optimized['RMSE']:.4f}", f"{mejoras['RMSE']:+.2f}%")
+    c3.metric("MAE",  f"{optimized['MAE']:.4f}",  f"{mejoras['MAE']:+.2f}%")
+    c4.metric("MSE",  f"{optimized['MSE']:.4f}",  f"{mejoras['MSE']:+.2f}%")
+
+    comp_df = pd.DataFrame({
+        "Métrica":     ["R²", "RMSE", "MAE", "MSE"],
+        "Baseline":    [baseline[k] for k in ["R2", "RMSE", "MAE", "MSE"]],
+        "Optimizado":  [optimized[k] for k in ["R2", "RMSE", "MAE", "MSE"]],
+        "Δ absoluto":  [optimized[k] - baseline[k] for k in ["R2", "RMSE", "MAE", "MSE"]],
+        "Mejora %":    [mejoras[k] for k in ["R2", "RMSE", "MAE", "MSE"]],
+    })
+    st.dataframe(
+        comp_df.style.format({
+            "Baseline":   "{:.4f}",
+            "Optimizado": "{:.4f}",
+            "Δ absoluto": "{:+.4f}",
+            "Mejora %":   "{:+.2f}%",
+        }),
+        use_container_width=True,
+    )
+
+    with st.expander("Mejores hiperparámetros encontrados"):
+        st.json(st.session_state.optuna_best_params)
+
+    col_oh, col_oi = st.columns(2)
+    with col_oh:
+        fig_hist = plot_optuna_history(st.session_state.optuna_study)
+        if fig_hist is not None:
+            pyplot_show(fig_hist)
+    with col_oi:
+        fig_pi = plot_optuna_param_importance(st.session_state.optuna_study)
+        if fig_pi is not None:
+            pyplot_show(fig_pi)
+        else:
+            st.caption("Importancia de parámetros no disponible (pocos trials).")
+
+
+# ----- K-fold cross-validation -----
+if st.session_state.get("kfold_run", False):
+    st.subheader(f"🔁 Cross-validation ({st.session_state.kfold_n_splits} folds)")
+
+    cv_df = st.session_state.kfold_df
+    resumen = st.session_state.kfold_resumen
+
+    st.caption(
+        "Métricas evaluadas en cada fold (hold-out). Una std baja indica que "
+        "el modelo es **estable** ante distintas particiones."
+    )
+
+    media_r2 = resumen.query("metrica == 'R2'").iloc[0]
+    media_rmse = resumen.query("metrica == 'RMSE'").iloc[0]
+    media_mae = resumen.query("metrica == 'MAE'").iloc[0]
+    media_mse = resumen.query("metrica == 'MSE'").iloc[0]
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("R² medio",  f"{media_r2['media']:.4f}",  f"± {media_r2['std']:.4f}")
+    k2.metric("RMSE medio", f"{media_rmse['media']:.4f}", f"± {media_rmse['std']:.4f}")
+    k3.metric("MAE medio",  f"{media_mae['media']:.4f}",  f"± {media_mae['std']:.4f}")
+    k4.metric("MSE medio",  f"{media_mse['media']:.4f}",  f"± {media_mse['std']:.4f}")
+
+    col_kt1, col_kt2 = st.columns([1, 1])
+    with col_kt1:
+        st.write("**Por fold:**")
+        st.dataframe(
+            cv_df.style.format({"R2": "{:.4f}", "RMSE": "{:.4f}",
+                                "MAE": "{:.4f}", "MSE": "{:.4f}"}),
+            use_container_width=True,
+        )
+    with col_kt2:
+        st.write("**Resumen:**")
+        st.dataframe(
+            resumen.style.format({"media": "{:.4f}", "std": "{:.4f}",
+                                  "min": "{:.4f}", "max": "{:.4f}"}),
+            use_container_width=True,
+        )
+
+    metric_plot = st.selectbox(
+        "Métrica a graficar",
+        options=["R2", "RMSE", "MAE", "MSE"],
+        index=0,
+    )
+    fig_cv = plot_kfold_resultados(cv_df, metric=metric_plot)
+    pyplot_show(fig_cv)
 
 
 # ----- Real vs Predicho -----
