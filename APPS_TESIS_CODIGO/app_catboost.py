@@ -10,12 +10,6 @@ from catboost import CatBoostRegressor, Pool
 import matplotlib.pyplot as plt
 import math
 
-try:
-    import shap
-    SHAP_DISPONIBLE = True
-except ImportError:
-    SHAP_DISPONIBLE = False
-
 
 st.set_page_config(
     page_title="CatBoost Regressor",
@@ -63,14 +57,86 @@ def calcular_metricas(y_real, y_predicho, nombre_set):
     }
 
 
-def preparar_features_para_shap_plot(X):
+def convertir_categoricas_a_codigos(X):
     X_plot = X.copy()
+
+    mapas_categorias = {}
 
     for col in X_plot.columns:
         if not pd.api.types.is_numeric_dtype(X_plot[col]):
-            X_plot[col] = pd.Categorical(X_plot[col]).codes
+            cat = pd.Categorical(X_plot[col])
+            X_plot[col] = cat.codes
+            mapas_categorias[col] = list(cat.categories)
 
-    return X_plot
+    return X_plot, mapas_categorias
+
+
+def seleccionar_variable_interaccion(variable_principal, variables, shap_df):
+    candidatas = [v for v in variables if v != variable_principal]
+
+    if len(candidatas) == 0:
+        return variable_principal
+
+    importancia_shap = (
+        shap_df[candidatas]
+        .abs()
+        .mean()
+        .sort_values(ascending=False)
+    )
+
+    return importancia_shap.index[0]
+
+
+def dependence_plot_estilo_shap(
+    ax,
+    X_original,
+    X_plot,
+    shap_df,
+    variable_principal,
+    variable_color,
+    mapas_categorias
+):
+    x = X_plot[variable_principal].values
+    y = shap_df[variable_principal].values
+    c = X_plot[variable_color].values
+
+    ruido = np.random.normal(0, 0.015, size=len(x))
+
+    if pd.api.types.is_numeric_dtype(X_original[variable_principal]):
+        x_plot = x
+    else:
+        x_plot = x + ruido
+
+    scatter = ax.scatter(
+        x_plot,
+        y,
+        c=c,
+        cmap="cool",
+        alpha=0.75,
+        s=18
+    )
+
+    ax.axhline(0, linestyle="--", linewidth=1)
+    ax.set_xlabel(variable_principal)
+    ax.set_ylabel(f"SHAP value for\n{variable_principal}")
+    ax.set_title(f"{variable_principal} coloreado por {variable_color}")
+
+    if variable_principal in mapas_categorias:
+        categorias_x = mapas_categorias[variable_principal]
+        ax.set_xticks(range(len(categorias_x)))
+        ax.set_xticklabels(categorias_x, rotation=45, ha="right")
+
+    cbar = plt.colorbar(scatter, ax=ax)
+
+    if variable_color in mapas_categorias:
+        categorias_color = mapas_categorias[variable_color]
+        ticks = list(range(len(categorias_color)))
+        cbar.set_ticks(ticks)
+        cbar.set_ticklabels(categorias_color)
+
+    cbar.set_label(variable_color)
+
+    return ax
 
 
 uploaded_file = st.sidebar.file_uploader(
@@ -550,28 +616,48 @@ if st.sidebar.button("Entrenar CatBoost"):
 
     st.subheader("SHAP summary plot")
 
-    if SHAP_DISPONIBLE:
-        X_test_shap_plot = preparar_features_para_shap_plot(X_test)
+    X_test_plot, mapas_categorias = convertir_categoricas_a_codigos(X_test)
 
-        fig_shap_summary = plt.figure(figsize=(12, max(6, len(predictoras) * 0.45)))
+    orden_shap = shap_importancia["variable"].tolist()
 
-        shap.summary_plot(
-            shap_values,
-            X_test_shap_plot,
-            feature_names=predictoras,
-            show=False,
-            max_display=len(predictoras)
+    fig_shap_summary, ax_shap_summary = plt.subplots(
+        figsize=(12, max(6, len(orden_shap) * 0.45))
+    )
+
+    ultimo_scatter = None
+
+    for i, variable in enumerate(reversed(orden_shap)):
+        valores_feature = X_test_plot[variable].values
+        valores_shap = shap_df[variable].values
+
+        y_jitter = np.random.normal(
+            loc=i,
+            scale=0.08,
+            size=len(valores_shap)
         )
 
-        plt.title("SHAP summary plot - Test")
-        st.pyplot(fig_shap_summary)
-        plt.close(fig_shap_summary)
-
-    else:
-        st.warning(
-            "No se pudo cargar la librería shap. "
-            "Agrega shap al requirements.txt para mostrar el SHAP summary plot."
+        ultimo_scatter = ax_shap_summary.scatter(
+            valores_shap,
+            y_jitter,
+            c=valores_feature,
+            cmap="cool",
+            alpha=0.65,
+            s=18
         )
+
+    ax_shap_summary.axvline(0, linestyle="--")
+    ax_shap_summary.set_yticks(range(len(orden_shap)))
+    ax_shap_summary.set_yticklabels(list(reversed(orden_shap)))
+    ax_shap_summary.set_xlabel("SHAP value")
+    ax_shap_summary.set_ylabel("Variable")
+    ax_shap_summary.set_title("SHAP summary plot - Test")
+
+    cbar = fig_shap_summary.colorbar(ultimo_scatter, ax=ax_shap_summary)
+    cbar.set_label("Valor de la variable")
+
+    fig_shap_summary.tight_layout()
+
+    st.pyplot(fig_shap_summary)
 
     with st.expander("Ver SHAP values por observación"):
         shap_mostrar = shap_df.copy()
@@ -580,7 +666,43 @@ if st.sidebar.button("Entrenar CatBoost"):
         shap_mostrar["real"] = y_test.values
         st.dataframe(shap_mostrar.head(200), use_container_width=True)
 
-    st.subheader("SHAP dependence plots")
+    st.subheader("SHAP dependence plot individual")
+
+    variable_dependence = st.selectbox(
+        "Variable principal para SHAP dependence plot",
+        options=shap_importancia["variable"].tolist(),
+        index=0
+    )
+
+    variable_color_default = seleccionar_variable_interaccion(
+        variable_dependence,
+        predictoras,
+        shap_df
+    )
+
+    variable_color = st.selectbox(
+        "Variable usada como color/interacción",
+        options=predictoras,
+        index=predictoras.index(variable_color_default)
+    )
+
+    fig_dep_ind, ax_dep_ind = plt.subplots(figsize=(9, 6))
+
+    dependence_plot_estilo_shap(
+        ax=ax_dep_ind,
+        X_original=X_test,
+        X_plot=X_test_plot,
+        shap_df=shap_df,
+        variable_principal=variable_dependence,
+        variable_color=variable_color,
+        mapas_categorias=mapas_categorias
+    )
+
+    fig_dep_ind.tight_layout()
+
+    st.pyplot(fig_dep_ind)
+
+    st.subheader("SHAP dependence plots en matriz")
 
     variables_top_shap = shap_importancia["variable"].head(top_n_shap).tolist()
 
@@ -590,7 +712,7 @@ if st.sidebar.button("Entrenar CatBoost"):
     fig_dep, axes = plt.subplots(
         n_rows,
         n_cols,
-        figsize=(14, max(5, n_rows * 4))
+        figsize=(16, max(6, n_rows * 5))
     )
 
     if n_rows == 1:
@@ -601,20 +723,21 @@ if st.sidebar.button("Entrenar CatBoost"):
     for i, variable in enumerate(variables_top_shap):
         ax_dep = axes[i]
 
-        x_values = X_test[variable]
-        y_values = shap_df[variable]
+        variable_interaccion = seleccionar_variable_interaccion(
+            variable,
+            predictoras,
+            shap_df
+        )
 
-        if pd.api.types.is_numeric_dtype(x_values):
-            ax_dep.scatter(x_values, y_values, alpha=0.55)
-            ax_dep.set_xlabel(variable)
-        else:
-            x_codes = pd.Categorical(x_values).codes
-            ax_dep.scatter(x_codes, y_values, alpha=0.55)
-            ax_dep.set_xlabel(f"{variable} - códigos categóricos")
-
-        ax_dep.axhline(0, linestyle="--")
-        ax_dep.set_ylabel("SHAP value")
-        ax_dep.set_title(f"SHAP dependence: {variable}")
+        dependence_plot_estilo_shap(
+            ax=ax_dep,
+            X_original=X_test,
+            X_plot=X_test_plot,
+            shap_df=shap_df,
+            variable_principal=variable,
+            variable_color=variable_interaccion,
+            mapas_categorias=mapas_categorias
+        )
 
     for j in range(len(variables_top_shap), len(axes)):
         axes[j].axis("off")
