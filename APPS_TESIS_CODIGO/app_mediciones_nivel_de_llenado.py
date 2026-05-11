@@ -9,7 +9,7 @@ st.set_page_config(
 )
 
 st.title("Nivel de llenado SAG 2")
-st.caption("Grind Out y Crash Stop diferenciados por método")
+st.caption("Grind Out y Crash Stop en gráficos separados, diferenciados por método")
 
 data = [
     {"Fecha": "18/08/2022", "Metodo": "Faro (Elecmetal)", "Tipo": "Grind Out", "Valor": 16.7},
@@ -53,46 +53,67 @@ df_filtrado = df[
     (df["Metodo"].isin(metodos))
 ].copy()
 
-fig = px.scatter(
-    df_filtrado,
-    x="Fecha",
-    y="Valor",
-    color="Metodo",
-    symbol="Tipo",
-    facet_row="Tipo",
-    text="Valor",
-    hover_data={
-        "Fecha": "|%d/%m/%Y",
-        "Metodo": True,
-        "Tipo": True,
-        "Valor": ":.1f"
-    },
-    labels={
-        "Fecha": "Fecha",
-        "Valor": "Nivel de llenado (%)",
-        "Metodo": "Método",
-        "Tipo": "Tipo de medición"
-    },
-    title="Nivel de llenado por fecha, método y tipo de medición"
-)
 
-fig.update_traces(
-    mode="markers+text",
-    textposition="top center",
-    marker=dict(size=11)
-)
+def crear_grafico(df_tipo, titulo):
+    fig = px.scatter(
+        df_tipo,
+        x="Fecha",
+        y="Valor",
+        color="Metodo",
+        text="Valor",
+        hover_data={
+            "Fecha": "|%d/%m/%Y",
+            "Metodo": True,
+            "Tipo": True,
+            "Valor": ":.1f"
+        },
+        labels={
+            "Fecha": "Fecha",
+            "Valor": "Nivel de llenado (%)",
+            "Metodo": "Método",
+            "Tipo": "Tipo de medición"
+        },
+        title=titulo
+    )
 
-fig.update_layout(
-    height=700,
-    xaxis_title="Fecha",
-    yaxis_title="Nivel de llenado (%)",
-    legend_title="Método",
-    hovermode="closest"
-)
+    fig.update_traces(
+        mode="markers+text",
+        textposition="top center",
+        marker=dict(size=11)
+    )
 
-fig.update_yaxes(matches=None)
+    fig.update_layout(
+        height=450,
+        xaxis_title="Fecha",
+        yaxis_title="Nivel de llenado (%)",
+        legend_title="Método",
+        hovermode="closest"
+    )
 
-st.plotly_chart(fig, use_container_width=True)
+    return fig
+
+
+df_grind_out = df_filtrado[df_filtrado["Tipo"] == "Grind Out"]
+df_crash_stop = df_filtrado[df_filtrado["Tipo"] == "Crash Stop"]
+
+if not df_grind_out.empty:
+    fig_grind_out = crear_grafico(
+        df_grind_out,
+        "Nivel de llenado - Grind Out"
+    )
+    st.plotly_chart(fig_grind_out, use_container_width=True)
+else:
+    st.info("No hay datos disponibles para Grind Out con los filtros seleccionados.")
+
+if not df_crash_stop.empty:
+    fig_crash_stop = crear_grafico(
+        df_crash_stop,
+        "Nivel de llenado - Crash Stop"
+    )
+    st.plotly_chart(fig_crash_stop, use_container_width=True)
+else:
+    st.info("No hay datos disponibles para Crash Stop con los filtros seleccionados.")
+
 
 st.subheader("Datos")
 tabla = df_filtrado.copy()
