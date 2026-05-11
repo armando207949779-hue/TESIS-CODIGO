@@ -48,6 +48,9 @@ def calcular_tabla_estadisticas(df, columnas_numericas):
     for col in columnas_numericas:
         serie = df[col].dropna()
 
+        if serie.empty:
+            continue
+
         p1 = serie.quantile(0.01)
         p5 = serie.quantile(0.05)
         p95 = serie.quantile(0.95)
@@ -183,6 +186,10 @@ st.write(columnas_numericas)
 
 tabla_stats = calcular_tabla_estadisticas(df, columnas_numericas)
 
+if tabla_stats.empty:
+    st.warning("No hay columnas numéricas con datos suficientes para calcular percentiles.")
+    st.stop()
+
 st.subheader("Tabla de límites por variable")
 
 st.write(
@@ -195,13 +202,15 @@ st.write(
 
 limites_usuario = {}
 
-for i, fila in tabla_stats.iterrows():
+for _, fila in tabla_stats.iterrows():
     variable = fila["Variable"]
 
     with st.expander(f"Variable: {variable}", expanded=True):
         c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
 
-        c1.metric("Variable", variable)
+        c1.write("**Variable**")
+        c1.write(variable)
+
         c2.metric("Min", f"{fila['Min']:.4f}")
         c3.metric("P1", f"{fila['P1']:.4f}")
         c4.metric("P5", f"{fila['P5']:.4f}")
@@ -231,15 +240,17 @@ for i, fila in tabla_stats.iterrows():
 
 
 # ---------------------------------------------------------
-# Tabla resumen editable visual
+# Tabla resumen visual
 # ---------------------------------------------------------
 
 st.subheader("Resumen de límites definidos")
 
 tabla_limites = tabla_stats.copy()
+
 tabla_limites["Límite inferior"] = tabla_limites["Variable"].map(
     lambda x: limites_usuario[x]["limite_inferior"]
 )
+
 tabla_limites["Límite superior"] = tabla_limites["Variable"].map(
     lambda x: limites_usuario[x]["limite_superior"]
 )
@@ -305,6 +316,7 @@ if "df_limpio" in st.session_state:
     filas_originales = len(df)
     filas_limpias = len(df_limpio)
     filas_eliminadas = filas_originales - filas_limpias
+
     porcentaje_eliminado = (
         100 * filas_eliminadas / filas_originales
         if filas_originales > 0
@@ -321,19 +333,39 @@ if "df_limpio" in st.session_state:
     st.subheader("Resumen de limpieza por variable")
     st.dataframe(resumen_limpieza, use_container_width=True)
 
+    # -----------------------------------------------------
+    # Gráfico horizontal porcentual ordenado de mayor a menor
+    # -----------------------------------------------------
+
     st.subheader("Gráfico porcentual de limpieza por variable")
 
-    fig, ax = plt.subplots(figsize=(12, 5))
-
-    ax.bar(
-        resumen_limpieza["Variable"],
-        resumen_limpieza["% eliminado sobre total inicial"]
+    resumen_grafico = resumen_limpieza.sort_values(
+        "% eliminado sobre total inicial",
+        ascending=True
     )
 
-    ax.set_xlabel("Variable")
-    ax.set_ylabel("% eliminado sobre total inicial")
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    ax.barh(
+        resumen_grafico["Variable"],
+        resumen_grafico["% eliminado sobre total inicial"]
+    )
+
+    ax.set_xlabel("% eliminado sobre total inicial")
+    ax.set_ylabel("Variable")
     ax.set_title("Porcentaje de registros eliminados por variable")
-    ax.tick_params(axis="x", rotation=45)
+
+    max_valor = resumen_grafico["% eliminado sobre total inicial"].max()
+
+    for i, valor in enumerate(resumen_grafico["% eliminado sobre total inicial"]):
+        ax.text(
+            valor,
+            i,
+            f" {valor:.2f}%",
+            va="center"
+        )
+
+    ax.set_xlim(0, max_valor * 1.15 if max_valor > 0 else 1)
 
     st.pyplot(fig)
 
