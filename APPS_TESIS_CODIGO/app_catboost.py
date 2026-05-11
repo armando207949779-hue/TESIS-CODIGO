@@ -26,7 +26,6 @@ st.write(
 def cargar_california_housing():
     data = fetch_california_housing(as_frame=True)
     df = data.frame.copy()
-    df["target"] = data.target
     return df
 
 
@@ -68,10 +67,12 @@ if df.shape[1] < 2:
 
 columnas = df.columns.tolist()
 
+target_default = "MedHouseVal" if "MedHouseVal" in columnas else columnas[-1]
+
 target = st.sidebar.selectbox(
     "Elige la variable target",
     columnas,
-    index=columnas.index("target") if "target" in columnas else 0
+    index=columnas.index(target_default)
 )
 
 predictoras_disponibles = [col for col in columnas if col != target]
@@ -132,12 +133,10 @@ if len(predictoras) == 0:
 
 df_model = df[[target] + predictoras].copy()
 
-# Convertir columnas tipo texto a categóricas
 for col in df_model.columns:
     if df_model[col].dtype == "object":
         df_model[col] = df_model[col].astype("category")
 
-# Eliminar filas con valores nulos
 filas_antes = df_model.shape[0]
 df_model = df_model.dropna()
 filas_despues = df_model.shape[0]
@@ -153,7 +152,6 @@ if df_model.shape[0] < 10:
 X = df_model[predictoras]
 y = df_model[target]
 
-# Validar que la target sea numérica
 if not pd.api.types.is_numeric_dtype(y):
     st.error("La variable target debe ser numérica para usar CatBoostRegressor.")
     st.stop()
@@ -206,11 +204,8 @@ if st.sidebar.button("Entrenar CatBoost"):
         y_pred = model.predict(X_test)
 
     mae = mean_absolute_error(y_test, y_pred)
-
-    # Corrección compatible con versiones nuevas de scikit-learn
     mse = mean_squared_error(y_test, y_pred)
     rmse = np.sqrt(mse)
-
     r2 = r2_score(y_test, y_pred)
 
     st.success("Modelo entrenado correctamente.")
