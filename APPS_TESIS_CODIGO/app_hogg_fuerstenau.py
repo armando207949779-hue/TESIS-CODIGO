@@ -48,8 +48,8 @@ def sag_power_calculator(
     fv = void_fraction
 
     # Geometry
-    D_m = D_ft * 0.305
-    L_m = L_ft * 0.305
+    D_m = D_ft * 0.3048
+    L_m = L_ft * 0.3048
     mill_volume_m3 = math.pi * D_m**2 * L_m / 4.0
     charge_volume_m3 = J * mill_volume_m3
 
@@ -190,14 +190,38 @@ with st.sidebar.expander("Dimensiones y velocidad", expanded=True):
 with st.sidebar.expander("Llenado de carga", expanded=True):
     J_percent = st.number_input("Total charge J, %", min_value=0.0, value=32.00, step=0.01)
     Jb_percent = st.number_input("Ball filling Jb, %", min_value=0.0, value=17.00, step=0.01)
-    Jp_percent = st.number_input("Slurry filling Jp, %", min_value=0.0, max_value=100.0, value=60.00, step=0.01)
-    void_fraction = st.number_input("Void fraction fv", min_value=0.0, max_value=1.0, value=0.40, step=0.01)
+    Jp_percent = st.number_input(
+        "Slurry filling Jp, %",
+        min_value=0.0,
+        max_value=100.0,
+        value=60.00,
+        step=0.01
+    )
+    void_fraction = st.number_input(
+        "Void fraction fv",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.40,
+        step=0.01
+    )
 
 with st.sidebar.expander("Densidades y pérdidas", expanded=True):
-    solids_percent = st.number_input("Solids fs, %", min_value=0.0, max_value=100.0, value=71.00, step=0.01)
+    solids_percent = st.number_input(
+        "Solids fs, %",
+        min_value=0.0,
+        max_value=100.0,
+        value=71.00,
+        step=0.01
+    )
     ore_density = st.number_input("Ore density rho_m, ton/m³", min_value=0.0, value=2.80, step=0.01)
     balls_density = st.number_input("Balls density rho_b, ton/m³", min_value=0.0, value=7.75, step=0.01)
-    losses_percent = st.number_input("Power losses, %", min_value=0.0, max_value=99.99, value=3.00, step=0.01)
+    losses_percent = st.number_input(
+        "Power losses, %",
+        min_value=0.0,
+        max_value=99.99,
+        value=3.00,
+        step=0.01
+    )
 
 
 # ------------------------------------------------------------
@@ -252,46 +276,249 @@ col3.metric("Velocidad crítica", f"{results['Nc_percent']:.2f} %")
 
 st.divider()
 
-st.header("Tabla de resultados")
 
-results_table = {
-    "Output": [
-        "Velocidad crítica, Ncrit",
-        "Velocidad del molino, Nc",
-        "Fracción de velocidad crítica, Nc",
-        "Densidad de pulpa, rho_p",
-        "Volumen interno del molino",
-        "Volumen de carga, V",
-        "Peso bolas, Wb",
-        "Peso rocas, Wr",
-        "Peso pulpa, Ws",
-        "Densidad aparente, rho_app",
-        "Potencia bolas",
-        "Potencia rocas",
-        "Potencia pulpa",
-        "Potencia neta, Pnet",
-        "Potencia bruta, Pgross"
-    ],
-    "Valor": [
-        f"{results['Ncrit_rpm']:.3f} rpm",
-        f"{results['Nc_percent']:.2f} % critical",
-        f"{results['Nc']:.4f}",
-        f"{results['rho_p']:.3f} ton/m³",
-        f"{results['mill_volume_m3']:.2f} m³",
-        f"{results['charge_volume_m3']:.2f} m³",
-        f"{results['Wb_ton']:.2f} ton",
-        f"{results['Wr_ton']:.2f} ton",
-        f"{results['Ws_ton']:.2f} ton",
-        f"{results['rho_app']:.3f} ton/m³",
-        f"{results['P_balls_kW']:.0f} kW",
-        f"{results['P_rocks_kW']:.0f} kW",
-        f"{results['P_slurry_kW']:.0f} kW",
-        f"{results['Pnet_kW']:.0f} kW",
-        f"{results['Pgross_kW']:.0f} kW"
-    ]
-}
+# ------------------------------------------------------------
+# Inputs and outputs table
+# ------------------------------------------------------------
+st.header("Tabla de inputs y outputs")
 
-st.table(results_table)
+io_table = [
+    # Inputs - Dimensiones y velocidad
+    {
+        "Tipo": "Input",
+        "Categoría": "Dimensiones y velocidad",
+        "Variable": "Diámetro del molino",
+        "Símbolo": "D",
+        "Valor": f"{D_ft:.2f}",
+        "Unidad": "ft"
+    },
+    {
+        "Tipo": "Input",
+        "Categoría": "Dimensiones y velocidad",
+        "Variable": "Longitud del molino",
+        "Símbolo": "L",
+        "Valor": f"{L_ft:.2f}",
+        "Unidad": "ft"
+    },
+    {
+        "Tipo": "Input",
+        "Categoría": "Dimensiones y velocidad",
+        "Variable": "Velocidad del molino",
+        "Símbolo": "RPM",
+        "Valor": f"{RPM:.2f}",
+        "Unidad": "rpm"
+    },
+    {
+        "Tipo": "Input",
+        "Categoría": "Dimensiones y velocidad",
+        "Variable": "Ángulo de levantamiento",
+        "Símbolo": "α",
+        "Valor": f"{alpha_deg:.2f}",
+        "Unidad": "°"
+    },
+
+    # Inputs - Llenado de carga
+    {
+        "Tipo": "Input",
+        "Categoría": "Llenado de carga",
+        "Variable": "Carga total",
+        "Símbolo": "J",
+        "Valor": f"{J_percent:.2f}",
+        "Unidad": "%"
+    },
+    {
+        "Tipo": "Input",
+        "Categoría": "Llenado de carga",
+        "Variable": "Llenado de bolas",
+        "Símbolo": "Jb",
+        "Valor": f"{Jb_percent:.2f}",
+        "Unidad": "%"
+    },
+    {
+        "Tipo": "Input",
+        "Categoría": "Llenado de carga",
+        "Variable": "Llenado intersticial de pulpa",
+        "Símbolo": "Jp",
+        "Valor": f"{Jp_percent:.2f}",
+        "Unidad": "%"
+    },
+    {
+        "Tipo": "Input",
+        "Categoría": "Llenado de carga",
+        "Variable": "Fracción de vacíos",
+        "Símbolo": "fv",
+        "Valor": f"{void_fraction:.3f}",
+        "Unidad": "-"
+    },
+
+    # Inputs - Densidades y pérdidas
+    {
+        "Tipo": "Input",
+        "Categoría": "Densidades y pérdidas",
+        "Variable": "Sólidos en pulpa",
+        "Símbolo": "fs",
+        "Valor": f"{solids_percent:.2f}",
+        "Unidad": "%"
+    },
+    {
+        "Tipo": "Input",
+        "Categoría": "Densidades y pérdidas",
+        "Variable": "Densidad del mineral",
+        "Símbolo": "ρm",
+        "Valor": f"{ore_density:.3f}",
+        "Unidad": "ton/m³"
+    },
+    {
+        "Tipo": "Input",
+        "Categoría": "Densidades y pérdidas",
+        "Variable": "Densidad de bolas",
+        "Símbolo": "ρb",
+        "Valor": f"{balls_density:.3f}",
+        "Unidad": "ton/m³"
+    },
+    {
+        "Tipo": "Input",
+        "Categoría": "Densidades y pérdidas",
+        "Variable": "Pérdidas de potencia",
+        "Símbolo": "losses",
+        "Valor": f"{losses_percent:.2f}",
+        "Unidad": "%"
+    },
+
+    # Outputs - Velocidad
+    {
+        "Tipo": "Output",
+        "Categoría": "Velocidad",
+        "Variable": "Velocidad crítica",
+        "Símbolo": "Ncrit",
+        "Valor": f"{results['Ncrit_rpm']:.3f}",
+        "Unidad": "rpm"
+    },
+    {
+        "Tipo": "Output",
+        "Categoría": "Velocidad",
+        "Variable": "Velocidad del molino respecto a crítica",
+        "Símbolo": "Nc",
+        "Valor": f"{results['Nc_percent']:.2f}",
+        "Unidad": "%"
+    },
+    {
+        "Tipo": "Output",
+        "Categoría": "Velocidad",
+        "Variable": "Fracción de velocidad crítica",
+        "Símbolo": "Nc",
+        "Valor": f"{results['Nc']:.4f}",
+        "Unidad": "-"
+    },
+
+    # Outputs - Volúmenes y densidades
+    {
+        "Tipo": "Output",
+        "Categoría": "Volúmenes y densidades",
+        "Variable": "Densidad de pulpa",
+        "Símbolo": "ρp",
+        "Valor": f"{results['rho_p']:.3f}",
+        "Unidad": "ton/m³"
+    },
+    {
+        "Tipo": "Output",
+        "Categoría": "Volúmenes y densidades",
+        "Variable": "Volumen interno del molino",
+        "Símbolo": "Vm",
+        "Valor": f"{results['mill_volume_m3']:.2f}",
+        "Unidad": "m³"
+    },
+    {
+        "Tipo": "Output",
+        "Categoría": "Volúmenes y densidades",
+        "Variable": "Volumen de carga",
+        "Símbolo": "V",
+        "Valor": f"{results['charge_volume_m3']:.2f}",
+        "Unidad": "m³"
+    },
+    {
+        "Tipo": "Output",
+        "Categoría": "Volúmenes y densidades",
+        "Variable": "Densidad aparente de carga",
+        "Símbolo": "ρapp",
+        "Valor": f"{results['rho_app']:.3f}",
+        "Unidad": "ton/m³"
+    },
+
+    # Outputs - Pesos
+    {
+        "Tipo": "Output",
+        "Categoría": "Pesos de carga",
+        "Variable": "Peso de bolas",
+        "Símbolo": "Wb",
+        "Valor": f"{results['Wb_ton']:.2f}",
+        "Unidad": "ton"
+    },
+    {
+        "Tipo": "Output",
+        "Categoría": "Pesos de carga",
+        "Variable": "Peso de rocas",
+        "Símbolo": "Wr",
+        "Valor": f"{results['Wr_ton']:.2f}",
+        "Unidad": "ton"
+    },
+    {
+        "Tipo": "Output",
+        "Categoría": "Pesos de carga",
+        "Variable": "Peso de pulpa",
+        "Símbolo": "Ws",
+        "Valor": f"{results['Ws_ton']:.2f}",
+        "Unidad": "ton"
+    },
+
+    # Outputs - Potencia
+    {
+        "Tipo": "Output",
+        "Categoría": "Potencia",
+        "Variable": "Potencia bolas",
+        "Símbolo": "Pb",
+        "Valor": f"{results['P_balls_kW']:.0f}",
+        "Unidad": "kW"
+    },
+    {
+        "Tipo": "Output",
+        "Categoría": "Potencia",
+        "Variable": "Potencia rocas",
+        "Símbolo": "Pr",
+        "Valor": f"{results['P_rocks_kW']:.0f}",
+        "Unidad": "kW"
+    },
+    {
+        "Tipo": "Output",
+        "Categoría": "Potencia",
+        "Variable": "Potencia pulpa",
+        "Símbolo": "Ps",
+        "Valor": f"{results['P_slurry_kW']:.0f}",
+        "Unidad": "kW"
+    },
+    {
+        "Tipo": "Output",
+        "Categoría": "Potencia",
+        "Variable": "Potencia neta",
+        "Símbolo": "Pnet",
+        "Valor": f"{results['Pnet_kW']:.0f}",
+        "Unidad": "kW"
+    },
+    {
+        "Tipo": "Output",
+        "Categoría": "Potencia",
+        "Variable": "Potencia bruta",
+        "Símbolo": "Pgross",
+        "Valor": f"{results['Pgross_kW']:.0f}",
+        "Unidad": "kW"
+    }
+]
+
+st.dataframe(
+    io_table,
+    use_container_width=True,
+    hide_index=True
+)
 
 
 # ------------------------------------------------------------
@@ -319,10 +546,10 @@ st.header("Ecuaciones usadas")
 st.latex(r"N_{crit}=\frac{76.6}{\sqrt{D}}")
 st.latex(r"N_c=\frac{RPM}{N_{crit}}")
 st.latex(r"\rho_p=\frac{1}{\frac{f_s}{\rho_m}+(1-f_s)}")
-st.latex(r"V=J\frac{\pi(0.305D)^2(0.305L)}{4}")
-st.latex(r"W_b=(1-f_v)\rho_bJ_b\frac{\pi(0.305D)^2(0.305L)}{4}")
-st.latex(r"W_r=(1-f_v)\rho_m(J-J_b)\frac{\pi(0.305D)^2(0.305L)}{4}")
-st.latex(r"W_s=\rho_pJ_pf_vJ\frac{\pi(0.305D)^2(0.305L)}{4}")
+st.latex(r"V=J\frac{\pi(0.3048D)^2(0.3048L)}{4}")
+st.latex(r"W_b=(1-f_v)\rho_bJ_b\frac{\pi(0.3048D)^2(0.3048L)}{4}")
+st.latex(r"W_r=(1-f_v)\rho_m(J-J_b)\frac{\pi(0.3048D)^2(0.3048L)}{4}")
+st.latex(r"W_s=\rho_pJ_pf_vJ\frac{\pi(0.3048D)^2(0.3048L)}{4}")
 st.latex(r"\rho_{app}=\frac{W_b+W_r+W_s}{V}")
 st.latex(
     r"P_{net}=0.238D^{3.5}\left(\frac{L}{D}\right)"
@@ -334,6 +561,4 @@ st.latex(r"P_{gross}=\frac{P_{net}}{1-\frac{losses}{100}}")
 # ------------------------------------------------------------
 # Notes
 # ------------------------------------------------------------
-st.info(
-    "Ejecuta esta app con: streamlit run app.py"
-)
+st.info("Ejecuta esta app con: streamlit run app.py")
