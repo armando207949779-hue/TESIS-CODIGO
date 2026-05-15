@@ -3,6 +3,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 from sklearn.datasets import fetch_california_housing
 from sklearn.model_selection import train_test_split
@@ -18,6 +19,7 @@ from sklearn.metrics import (
     accuracy_score,
     f1_score,
     classification_report,
+    confusion_matrix,
 )
 
 
@@ -26,10 +28,10 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Selección de variables con RFE")
+st.title("Selección visual de variables con RFE")
 st.write(
-    "Por defecto se carga California Housing. También puedes subir un archivo Parquet "
-    "y elegir la variable objetivo y los predictores con checkboxes."
+    "Por defecto se carga California Housing. También puedes subir un archivo Parquet, "
+    "elegir target y predictores con checkboxes, ejecutar RFE y ver gráficos de resultados."
 )
 
 
@@ -61,9 +63,27 @@ else:
         st.stop()
 
 st.subheader("Vista previa de los datos")
-st.dataframe(df.head())
 
-st.write(f"Filas: **{df.shape[0]}** | Columnas: **{df.shape[1]}**")
+metric_col1, metric_col2, metric_col3 = st.columns(3)
+with metric_col1:
+    st.metric("Filas", f"{df.shape[0]:,}")
+with metric_col2:
+    st.metric("Columnas", f"{df.shape[1]:,}")
+with metric_col3:
+    st.metric("Valores faltantes", f"{int(df.isna().sum().sum()):,}")
+
+with st.expander("Ver primeras filas", expanded=True):
+    st.dataframe(df.head(), use_container_width=True)
+
+numeric_preview_cols = df.select_dtypes(include=["int64", "float64", "int32", "float32"]).columns.tolist()
+if numeric_preview_cols:
+    st.subheader("Exploración rápida")
+    preview_col = st.selectbox(
+        "Variable numérica para visualizar distribución",
+        options=numeric_preview_cols,
+        index=numeric_preview_cols.index("MedHouseVal") if "MedHouseVal" in numeric_preview_cols else 0,
+    )
+    st.bar_chart(df[preview_col].dropna().value_counts(bins=30).sort_index())
 
 
 # -----------------------------
@@ -149,9 +169,16 @@ random_state = st.sidebar.number_input(
 )
 
 st.subheader("Selección actual")
-st.write(f"**Target:** {target_col}")
-st.write("**Predictores:**")
-st.write(selected_features)
+sel_col1, sel_col2, sel_col3 = st.columns(3)
+with sel_col1:
+    st.metric("Target", target_col)
+with sel_col2:
+    st.metric("Predictores elegidos", len(selected_features))
+with sel_col3:
+    st.metric("Filas disponibles", f"{df[selected_features + [target_col]].dropna().shape[0]:,}")
+
+with st.expander("Ver predictores seleccionados", expanded=False):
+    st.write(selected_features)
 
 
 # -----------------------------
@@ -183,6 +210,19 @@ with col1:
 with col2:
     st.write("**Variables categóricas**")
     st.write(categorical_features if categorical_features else "Ninguna")
+
+if problem_type == "Regresión" and numeric_features:
+    st.subheader("Relación visual con el target")
+    x_axis_feature = st.selectbox(
+        "Elige un predictor para graficar contra el target",
+        options=numeric_features,
+        index=0,
+    )
+    scatter_df = data[[x_axis_feature, target_col]].sample(
+        min(2000, len(data)),
+        random_state=int(random_state),
+    )
+    st.scatter_chart(scatter_df, x=x_axis_feature, y=target_col)
 
 
 # -----------------------------
@@ -299,10 +339,28 @@ selected_transformed_features = results.loc[
 ].tolist()
 
 st.subheader("Ranking de variables según RFE")
-st.dataframe(results)
+
+results_visual = results.copy()
+results_visual["estado"] = np.where(results_visual["seleccionada"], "Seleccionada", "No seleccionada")
+results_visual["puntuacion_visual"] = results_visual["ranking"].max() - results_visual["ranking"] + 1
+
+tab_ranking, tab_table = st.tabs(["Gráfico", "Tabla"])
+
+with tab_ranking:
+    chart_data = (
+        results_visual.sort_values("puntuacion_visual", ascending=False)
+        .head(25)
+        .set_index("variable_transformada")[["puntuacion_visual"]]
+    )
+    st.caption("Mayor puntuación visual = mejor ranking RFE. Se muestran hasta 25 variables transformadas.")
+    st.bar_chart(chart_data)
+
+with tab_table:
+    st.dataframe(results_visual, use_container_width=True)
 
 st.subheader("Variables seleccionadas")
-st.write(selected_transformed_features)
+selected_df = pd.DataFrame({"variable_transformada": selected_transformed_features})
+st.dataframe(selected_df, use_container_width=True)
 
 
 # -----------------------------
@@ -339,6 +397,18 @@ if problem_type == "Regresión":
     with col2:
         st.metric("R²", round(r2, 4))
 
+    st.subheader("Predicción vs valor real")
+    pred_df = pd.DataFrame({
+        "real": np.array(y_test),
+        "predicho": np.array(y_pred),
+    }).sample(min(2000, len(y_test)), random_state=int(random_state))
+
+    st.scatter_chart(pred_df, x="real", y="predicho")
+
+    st.subheader("Errores del modelo")
+    residuals_df = pd.DataFrame({"residuo": pred_df["real"] - pred_df["predicho"]})
+    st.bar_chart(residuals_df["residuo"].value_counts(bins=30).sort_index())
+
 else:
     accuracy = accuracy_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred, average="weighted")
@@ -351,8 +421,29 @@ else:
     with col2:
         st.metric("F1 weighted", round(f1, 4))
 
-    st.text("Classification report")
-    st.text(classification_report(y_test, y_pred))
+    st.subheader("Matriz de confusión")
+    labels = np.unique(np.concatenate([np.array(y_test), np.array(y_pred)]))
+    cm = confusion_matrix(y_test, y_pred, labels=labels)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    image = ax.imshow(cm)
+    ax.set_title("Matriz de confusión")
+    ax.set_xlabel("Predicción")
+    ax.set_ylabel("Valor real")
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_yticks(np.arange(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticklabels(labels)
+
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, cm[i, j], ha="center", va="center")
+
+    fig.colorbar(image, ax=ax)
+    st.pyplot(fig)
+
+    with st.expander("Ver classification report", expanded=False):
+        st.text(classification_report(y_test, y_pred))
 
 
 # -----------------------------
