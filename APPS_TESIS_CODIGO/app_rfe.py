@@ -74,6 +74,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def clean_feature_name(feature_name):
+    """Quita los prefijos técnicos que agrega ColumnTransformer: num__ y cat__."""
+    feature_name = str(feature_name)
+    for prefix in ("num__", "cat__", "remainder__"):
+        if feature_name.startswith(prefix):
+            return feature_name.replace(prefix, "", 1)
+    return feature_name
+
+
 # -----------------------------
 # Cargar datos
 # -----------------------------
@@ -341,7 +350,8 @@ try:
     X_train_transformed = preprocessor.fit_transform(X_train)
     X_test_transformed = preprocessor.transform(X_test)
 
-    feature_names = preprocessor.get_feature_names_out()
+    feature_names_raw = preprocessor.get_feature_names_out()
+    feature_names = [clean_feature_name(name) for name in feature_names_raw]
 except Exception as e:
     st.error(f"Error en el preprocesamiento: {e}")
     st.stop()
@@ -410,23 +420,55 @@ if selected_transformed_features:
 else:
     st.info("No hay variables seleccionadas.")
 
-st.markdown("#### Ranking visual con colores")
-plot_df = results_visual.sort_values(["seleccionada", "puntuacion_visual"], ascending=[False, False]).head(30)
-plot_df = plot_df.sort_values("puntuacion_visual", ascending=True)
+st.markdown("#### Ranking visual horizontal con colores")
 
-fig, ax = plt.subplots(figsize=(10, max(5, 0.35 * len(plot_df))))
-ax.barh(
-    plot_df["variable_transformada"],
+# Gráfico horizontal para facilitar la lectura de nombres largos.
+# Primero aparecen las variables seleccionadas y después las no seleccionadas mejor rankeadas.
+plot_df = results_visual.sort_values(
+    ["seleccionada", "ranking", "variable_transformada"],
+    ascending=[False, True, True],
+).head(30).copy()
+
+plot_df["etiqueta"] = np.where(
+    plot_df["seleccionada"],
+    "✅ " + plot_df["variable_transformada"].astype(str),
+    "   " + plot_df["variable_transformada"].astype(str),
+)
+
+fig_height = max(5, 0.45 * len(plot_df))
+fig, ax = plt.subplots(figsize=(13, fig_height))
+
+bars = ax.barh(
+    plot_df["etiqueta"],
     plot_df["puntuacion_visual"],
     color=plot_df["color"],
 )
+
+# La mejor variable queda arriba.
+ax.invert_yaxis()
+
 ax.set_xlabel("Puntuación visual: mayor valor = mejor ranking RFE")
-ax.set_ylabel("Variable transformada")
-ax.set_title("Variables seleccionadas en verde")
+ax.set_ylabel("Variables")
+ax.set_title("Ranking RFE horizontal: seleccionadas en verde")
 ax.grid(axis="x", alpha=0.25)
+
+# Mostrar el ranking al final de cada barra.
+for bar, ranking in zip(bars, plot_df["ranking"]):
+    width = bar.get_width()
+    ax.text(
+        width + 0.05,
+        bar.get_y() + bar.get_height() / 2,
+        f"ranking {int(ranking)}",
+        va="center",
+        fontsize=9,
+    )
+
+# Dar espacio a las etiquetas de ranking a la derecha.
+ax.set_xlim(0, plot_df["puntuacion_visual"].max() + 2)
+fig.tight_layout()
 st.pyplot(fig)
 
-st.caption("Se muestran hasta 30 variables transformadas, priorizando las seleccionadas y las mejor rankeadas.")
+st.caption("Barras horizontales: arriba aparecen las variables seleccionadas en verde y luego las demás mejor rankeadas. Los prefijos técnicos num__ y cat__ fueron eliminados para facilitar la lectura.")
 
 with st.expander("Ver tabla completa con colores", expanded=True):
     table_view = results_visual[["variable_transformada", "estado", "ranking", "puntuacion_visual"]]
