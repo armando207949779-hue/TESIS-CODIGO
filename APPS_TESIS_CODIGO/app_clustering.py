@@ -32,7 +32,9 @@ def load_uploaded_parquet(uploaded_file):
 
 
 def get_numeric_columns(df):
-    return df.select_dtypes(include=["int64", "float64", "int32", "float32"]).columns.tolist()
+    return df.select_dtypes(
+        include=["int64", "float64", "int32", "float32"]
+    ).columns.tolist()
 
 
 def run_clustering(X_scaled, algorithm, n_clusters, eps, min_samples):
@@ -79,6 +81,7 @@ def plot_clusters(X_pca, labels):
 
 
 st.title("Machine Learning - Clustering")
+
 st.write(
     "Esta app usa **California Housing** por defecto, "
     "pero también permite subir un archivo **Parquet** para aplicar clustering."
@@ -134,11 +137,22 @@ if len(numeric_columns) < 2:
 
 st.sidebar.header("Configuración del modelo")
 
-selected_columns = st.sidebar.multiselect(
-    "Selecciona columnas numéricas",
-    options=numeric_columns,
-    default=numeric_columns[: min(5, len(numeric_columns))]
-)
+st.sidebar.write("Selecciona columnas numéricas")
+
+selected_columns = []
+
+default_columns = numeric_columns[: min(5, len(numeric_columns))]
+
+for col in numeric_columns:
+    checked = st.sidebar.checkbox(
+        col,
+        value=col in default_columns,
+        key=f"checkbox_{col}"
+    )
+
+    if checked:
+        selected_columns.append(col)
+
 
 if len(selected_columns) < 2:
     st.warning("Selecciona al menos 2 columnas numéricas.")
@@ -213,6 +227,7 @@ with col3:
 
 
 st.write("Distribución de registros por cluster:")
+
 cluster_counts = result_df["Cluster"].value_counts().sort_index()
 st.dataframe(cluster_counts.rename("Cantidad"))
 
@@ -230,11 +245,18 @@ try:
     unique_clusters = set(labels)
 
     if len(unique_clusters) > 1:
-        if not (algorithm == "DBSCAN" and len(unique_clusters) == 2 and -1 in unique_clusters):
+        if not (
+            algorithm == "DBSCAN"
+            and len(unique_clusters) == 2
+            and -1 in unique_clusters
+        ):
             score = silhouette_score(X_scaled, labels)
             st.metric("Silhouette Score", round(score, 4))
         else:
-            st.info("No se puede calcular correctamente Silhouette Score con solo ruido y un cluster.")
+            st.info(
+                "No se puede calcular correctamente Silhouette Score "
+                "con solo ruido y un cluster."
+            )
     else:
         st.info("No se puede calcular Silhouette Score con un solo cluster.")
 
