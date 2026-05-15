@@ -34,6 +34,45 @@ st.write(
     "elegir target y predictores con checkboxes, ejecutar RFE y ver gráficos de resultados."
 )
 
+st.markdown("""
+<style>
+.variable-chip {
+    display: inline-block;
+    padding: 0.35rem 0.7rem;
+    margin: 0.18rem 0.18rem 0.18rem 0;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 0.9rem;
+}
+.chip-selected {
+    background-color: #d1fae5;
+    color: #065f46;
+    border: 1px solid #10b981;
+}
+.chip-not-selected {
+    background-color: #f3f4f6;
+    color: #6b7280;
+    border: 1px solid #d1d5db;
+}
+.legend-box {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.legend-selected { background-color: #10b981; }
+.legend-not-selected { background-color: #d1d5db; }
+.result-card {
+    padding: 1rem;
+    border-radius: 0.8rem;
+    border: 1px solid #e5e7eb;
+    background-color: #ffffff;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 # -----------------------------
 # Cargar datos
@@ -338,29 +377,83 @@ selected_transformed_features = results.loc[
     "variable_transformada"
 ].tolist()
 
-st.subheader("Ranking de variables según RFE")
+st.subheader("Resultado de RFE: variables seleccionadas")
 
 results_visual = results.copy()
-results_visual["estado"] = np.where(results_visual["seleccionada"], "Seleccionada", "No seleccionada")
+results_visual["estado"] = np.where(results_visual["seleccionada"], "✅ Seleccionada", "No seleccionada")
 results_visual["puntuacion_visual"] = results_visual["ranking"].max() - results_visual["ranking"] + 1
+results_visual["color"] = np.where(results_visual["seleccionada"], "#10b981", "#d1d5db")
 
-tab_ranking, tab_table = st.tabs(["Gráfico", "Tabla"])
+summary_col1, summary_col2, summary_col3 = st.columns(3)
+with summary_col1:
+    st.metric("Variables transformadas", len(results_visual))
+with summary_col2:
+    st.metric("Seleccionadas por RFE", int(results_visual["seleccionada"].sum()))
+with summary_col3:
+    st.metric("No seleccionadas", int((~results_visual["seleccionada"]).sum()))
 
-with tab_ranking:
-    chart_data = (
-        results_visual.sort_values("puntuacion_visual", ascending=False)
-        .head(25)
-        .set_index("variable_transformada")[["puntuacion_visual"]]
+st.markdown(
+    """
+    <span class="legend-box legend-selected"></span><b>Verde:</b> variable seleccionada por RFE &nbsp;&nbsp;
+    <span class="legend-box legend-not-selected"></span><b>Gris:</b> variable no seleccionada
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown("#### Variables seleccionadas")
+if selected_transformed_features:
+    chips_html = "".join(
+        f'<span class="variable-chip chip-selected">{feature}</span>'
+        for feature in selected_transformed_features
     )
-    st.caption("Mayor puntuación visual = mejor ranking RFE. Se muestran hasta 25 variables transformadas.")
-    st.bar_chart(chart_data)
+    st.markdown(chips_html, unsafe_allow_html=True)
+else:
+    st.info("No hay variables seleccionadas.")
 
-with tab_table:
-    st.dataframe(results_visual, use_container_width=True)
+st.markdown("#### Ranking visual con colores")
+plot_df = results_visual.sort_values(["seleccionada", "puntuacion_visual"], ascending=[False, False]).head(30)
+plot_df = plot_df.sort_values("puntuacion_visual", ascending=True)
 
-st.subheader("Variables seleccionadas")
-selected_df = pd.DataFrame({"variable_transformada": selected_transformed_features})
-st.dataframe(selected_df, use_container_width=True)
+fig, ax = plt.subplots(figsize=(10, max(5, 0.35 * len(plot_df))))
+ax.barh(
+    plot_df["variable_transformada"],
+    plot_df["puntuacion_visual"],
+    color=plot_df["color"],
+)
+ax.set_xlabel("Puntuación visual: mayor valor = mejor ranking RFE")
+ax.set_ylabel("Variable transformada")
+ax.set_title("Variables seleccionadas en verde")
+ax.grid(axis="x", alpha=0.25)
+st.pyplot(fig)
+
+st.caption("Se muestran hasta 30 variables transformadas, priorizando las seleccionadas y las mejor rankeadas.")
+
+with st.expander("Ver tabla completa con colores", expanded=True):
+    table_view = results_visual[["variable_transformada", "estado", "ranking", "puntuacion_visual"]]
+
+    def highlight_selected(row):
+        if row["estado"] == "✅ Seleccionada":
+            return ["background-color: #d1fae5; color: #065f46; font-weight: bold"] * len(row)
+        return ["background-color: #f9fafb; color: #6b7280"] * len(row)
+
+    st.dataframe(
+        table_view.style.apply(highlight_selected, axis=1),
+        use_container_width=True,
+    )
+
+with st.expander("Ver variables no seleccionadas", expanded=False):
+    not_selected_features = results_visual.loc[
+        ~results_visual["seleccionada"],
+        "variable_transformada"
+    ].tolist()
+    if not_selected_features:
+        chips_html = "".join(
+            f'<span class="variable-chip chip-not-selected">{feature}</span>'
+            for feature in not_selected_features
+        )
+        st.markdown(chips_html, unsafe_allow_html=True)
+    else:
+        st.success("Todas las variables transformadas fueron seleccionadas.")
 
 
 # -----------------------------
