@@ -10,7 +10,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.feature_selection import RFE
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.metrics import (
@@ -23,59 +22,91 @@ from sklearn.metrics import (
 )
 
 
+# =========================================================
+# Configuración general
+# =========================================================
 st.set_page_config(
     page_title="Selección de variables con RFE",
-    layout="wide"
+    layout="wide",
 )
 
-st.title("Selección visual de variables con RFE")
-st.write(
-    "Por defecto se carga California Housing. También puedes subir un archivo Parquet, "
-    "elegir target y predictores con checkboxes, ejecutar RFE y ver gráficos de resultados."
+SELECTED_COLOR = "#10b981"      # verde
+NOT_SELECTED_COLOR = "#d1d5db"  # gris
+TEXT_DARK = "#111827"
+TEXT_MUTED = "#6b7280"
+
+
+st.markdown(
+    """
+    <style>
+    .main-title {
+        font-size: 2.1rem;
+        font-weight: 800;
+        margin-bottom: 0.25rem;
+    }
+    .subtitle {
+        color: #4b5563;
+        font-size: 1rem;
+        margin-bottom: 1.25rem;
+    }
+    .variable-chip {
+        display: inline-block;
+        padding: 0.35rem 0.7rem;
+        margin: 0.18rem 0.18rem 0.18rem 0;
+        border-radius: 999px;
+        font-weight: 700;
+        font-size: 0.9rem;
+    }
+    .chip-selected {
+        background-color: #d1fae5;
+        color: #065f46;
+        border: 1px solid #10b981;
+    }
+    .chip-not-selected {
+        background-color: #f3f4f6;
+        color: #6b7280;
+        border: 1px solid #d1d5db;
+    }
+    .legend-box {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border-radius: 4px;
+        margin-right: 6px;
+        vertical-align: middle;
+    }
+    .legend-selected { background-color: #10b981; }
+    .legend-not-selected { background-color: #d1d5db; }
+    .section-note {
+        color: #6b7280;
+        font-size: 0.92rem;
+        margin-top: -0.4rem;
+        margin-bottom: 0.8rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-st.markdown("""
-<style>
-.variable-chip {
-    display: inline-block;
-    padding: 0.35rem 0.7rem;
-    margin: 0.18rem 0.18rem 0.18rem 0;
-    border-radius: 999px;
-    font-weight: 700;
-    font-size: 0.9rem;
-}
-.chip-selected {
-    background-color: #d1fae5;
-    color: #065f46;
-    border: 1px solid #10b981;
-}
-.chip-not-selected {
-    background-color: #f3f4f6;
-    color: #6b7280;
-    border: 1px solid #d1d5db;
-}
-.legend-box {
-    display: inline-block;
-    width: 14px;
-    height: 14px;
-    border-radius: 4px;
-    margin-right: 6px;
-    vertical-align: middle;
-}
-.legend-selected { background-color: #10b981; }
-.legend-not-selected { background-color: #d1d5db; }
-.result-card {
-    padding: 1rem;
-    border-radius: 0.8rem;
-    border: 1px solid #e5e7eb;
-    background-color: #ffffff;
-}
-</style>
-""", unsafe_allow_html=True)
+st.markdown('<div class="main-title">Selección visual de variables con RFE</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="subtitle">Por defecto se usa California Housing. También puedes cargar un archivo Parquet, elegir target y predictores con checkboxes, ejecutar RFE y revisar los resultados con gráficos claros.</div>',
+    unsafe_allow_html=True,
+)
 
 
-def clean_feature_name(feature_name):
-    """Quita los prefijos técnicos que agrega ColumnTransformer: num__ y cat__."""
+# =========================================================
+# Funciones auxiliares
+# =========================================================
+@st.cache_data
+def load_california_housing() -> pd.DataFrame:
+    """Carga California Housing como dataset por defecto."""
+    california = fetch_california_housing(as_frame=True)
+    return california.frame.copy()
+
+
+def clean_feature_name(feature_name: str) -> str:
+    """Elimina prefijos técnicos generados por ColumnTransformer."""
     feature_name = str(feature_name)
     for prefix in ("num__", "cat__", "remainder__"):
         if feature_name.startswith(prefix):
@@ -83,21 +114,90 @@ def clean_feature_name(feature_name):
     return feature_name
 
 
-# -----------------------------
-# Cargar datos
-# -----------------------------
+def make_one_hot_encoder() -> OneHotEncoder:
+    """Crea OneHotEncoder compatible con distintas versiones de scikit-learn."""
+    try:
+        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError:
+        return OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+
+def render_chips(items, selected: bool = True) -> None:
+    """Muestra una lista como chips visuales."""
+    chip_class = "chip-selected" if selected else "chip-not-selected"
+    if not items:
+        st.info("No hay variables para mostrar.")
+        return
+
+    chips_html = "".join(
+        f'<span class="variable-chip {chip_class}">{item}</span>'
+        for item in items
+    )
+    st.markdown(chips_html, unsafe_allow_html=True)
+
+
+def draw_rfe_ranking_chart(results_visual: pd.DataFrame) -> None:
+    """Grafica ranking RFE en barras horizontales sin emojis."""
+    plot_df = results_visual.sort_values(
+        ["seleccionada", "ranking", "variable"],
+        ascending=[False, True, True],
+    ).head(30).copy()
+
+    plot_df["etiqueta"] = np.where(
+        plot_df["seleccionada"],
+        "Seleccionada - " + plot_df["variable"].astype(str),
+        "No seleccionada - " + plot_df["variable"].astype(str),
+    )
+
+    fig_height = max(5, 0.45 * len(plot_df))
+    fig, ax = plt.subplots(figsize=(13, fig_height))
+
+    bars = ax.barh(
+        plot_df["etiqueta"],
+        plot_df["puntuacion_visual"],
+        color=plot_df["color"],
+    )
+
+    ax.invert_yaxis()
+    ax.set_xlabel("Puntuación visual: mayor valor = mejor posición en RFE")
+    ax.set_ylabel("Variables")
+    ax.set_title("Ranking RFE horizontal")
+    ax.grid(axis="x", alpha=0.25)
+    ax.tick_params(axis="y", labelsize=9)
+
+    max_score = plot_df["puntuacion_visual"].max()
+    for bar, ranking in zip(bars, plot_df["ranking"]):
+        width = bar.get_width()
+        ax.text(
+            width + 0.05,
+            bar.get_y() + bar.get_height() / 2,
+            f"ranking {int(ranking)}",
+            va="center",
+            fontsize=9,
+            color=TEXT_DARK,
+        )
+
+    ax.set_xlim(0, max_score + 2)
+    fig.tight_layout()
+    st.pyplot(fig)
+
+
+def highlight_selected(row):
+    """Aplica colores a la tabla de resultados."""
+    if row["estado"] == "Seleccionada":
+        return ["background-color: #d1fae5; color: #065f46; font-weight: bold"] * len(row)
+    return ["background-color: #f9fafb; color: #6b7280"] * len(row)
+
+
+# =========================================================
+# Carga de datos
+# =========================================================
 st.sidebar.header("Datos")
 
 uploaded_file = st.sidebar.file_uploader(
     "Opcional: carga tu archivo .parquet",
-    type=["parquet"]
+    type=["parquet"],
 )
-
-@st.cache_data
-def load_california_housing():
-    california = fetch_california_housing(as_frame=True)
-    df_california = california.frame.copy()
-    return df_california
 
 if uploaded_file is None:
     df = load_california_housing()
@@ -110,14 +210,17 @@ else:
         st.error(f"No se pudo leer el archivo Parquet: {e}")
         st.stop()
 
-st.subheader("Vista previa de los datos")
+if df.empty:
+    st.error("El dataset está vacío.")
+    st.stop()
 
-metric_col1, metric_col2, metric_col3 = st.columns(3)
-with metric_col1:
+st.subheader("Resumen del dataset")
+summary_col1, summary_col2, summary_col3 = st.columns(3)
+with summary_col1:
     st.metric("Filas", f"{df.shape[0]:,}")
-with metric_col2:
+with summary_col2:
     st.metric("Columnas", f"{df.shape[1]:,}")
-with metric_col3:
+with summary_col3:
     st.metric("Valores faltantes", f"{int(df.isna().sum().sum()):,}")
 
 with st.expander("Ver primeras filas", expanded=True):
@@ -134,13 +237,12 @@ if numeric_preview_cols:
     st.bar_chart(df[preview_col].dropna().value_counts(bins=30).sort_index())
 
 
-# -----------------------------
-# Configuración
-# -----------------------------
+# =========================================================
+# Configuración del modelo
+# =========================================================
 st.sidebar.header("Configuración del modelo")
 
 columns = df.columns.tolist()
-
 default_target = "MedHouseVal" if "MedHouseVal" in columns else columns[-1]
 
 st.sidebar.markdown("### Variable objetivo")
@@ -151,7 +253,7 @@ for col in columns:
     checked = st.sidebar.checkbox(
         label=col,
         value=(col == default_target),
-        key=f"target_{col}"
+        key=f"target_{col}",
     )
     if checked:
         target_candidates.append(col)
@@ -161,7 +263,6 @@ if len(target_candidates) != 1:
     st.stop()
 
 target_col = target_candidates[0]
-
 available_features = [col for col in columns if col != target_col]
 
 st.sidebar.markdown("### Variables predictoras")
@@ -172,33 +273,30 @@ for col in available_features:
     checked = st.sidebar.checkbox(
         label=col,
         value=True,
-        key=f"feature_{col}"
+        key=f"feature_{col}",
     )
     if checked:
         selected_features.append(col)
 
-if len(selected_features) == 0:
+if not selected_features:
     st.warning("Selecciona al menos una variable predictora.")
     st.stop()
 
 problem_type = st.sidebar.selectbox(
     "Tipo de problema",
-    options=["Regresión", "Clasificación"]
+    options=["Regresión", "Clasificación"],
 )
 
 n_features_to_select = st.sidebar.slider(
     "Número de variables a seleccionar",
     min_value=1,
     max_value=len(selected_features),
-    value=min(5, len(selected_features))
+    value=min(5, len(selected_features)),
 )
 
 model_choice = st.sidebar.selectbox(
     "Modelo base para RFE",
-    options=[
-        "Regresión lineal / logística",
-        "Random Forest"
-    ]
+    options=["Regresión lineal / logística", "Random Forest"],
 )
 
 test_size = st.sidebar.slider(
@@ -206,56 +304,52 @@ test_size = st.sidebar.slider(
     min_value=0.1,
     max_value=0.5,
     value=0.2,
-    step=0.05
+    step=0.05,
 )
 
 random_state = st.sidebar.number_input(
     "Random state",
     min_value=0,
     value=42,
-    step=1
+    step=1,
 )
 
-st.subheader("Selección actual")
-sel_col1, sel_col2, sel_col3 = st.columns(3)
-with sel_col1:
-    st.metric("Target", target_col)
-with sel_col2:
-    st.metric("Predictores elegidos", len(selected_features))
-with sel_col3:
-    st.metric("Filas disponibles", f"{df[selected_features + [target_col]].dropna().shape[0]:,}")
 
-with st.expander("Ver predictores seleccionados", expanded=False):
-    st.write(selected_features)
+# =========================================================
+# Preparación de datos
+# =========================================================
+data = df[selected_features + [target_col]].copy().dropna()
 
-
-# -----------------------------
-# Preparar datos
-# -----------------------------
-data = df[selected_features + [target_col]].copy()
-
-# Eliminar filas con NA para simplificar
-data = data.dropna()
+if data.empty:
+    st.error("Después de eliminar valores faltantes, no quedan filas disponibles.")
+    st.stop()
 
 X = data[selected_features]
 y = data[target_col]
 
-if data.shape[0] == 0:
-    st.error("Después de eliminar valores faltantes, no quedan filas disponibles.")
-    st.stop()
-
 numeric_features = X.select_dtypes(include=["int64", "float64", "int32", "float32"]).columns.tolist()
 categorical_features = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
 
+st.subheader("Selección actual")
+selection_col1, selection_col2, selection_col3, selection_col4 = st.columns(4)
+with selection_col1:
+    st.metric("Target", target_col)
+with selection_col2:
+    st.metric("Predictores", len(selected_features))
+with selection_col3:
+    st.metric("Numéricas", len(numeric_features))
+with selection_col4:
+    st.metric("Categóricas", len(categorical_features))
+
+with st.expander("Ver predictores seleccionados", expanded=False):
+    render_chips(selected_features, selected=True)
+
 st.subheader("Tipos de variables detectadas")
-
-col1, col2 = st.columns(2)
-
-with col1:
+type_col1, type_col2 = st.columns(2)
+with type_col1:
     st.write("**Variables numéricas**")
     st.write(numeric_features if numeric_features else "Ninguna")
-
-with col2:
+with type_col2:
     st.write("**Variables categóricas**")
     st.write(categorical_features if categorical_features else "Ninguna")
 
@@ -273,79 +367,51 @@ if problem_type == "Regresión" and numeric_features:
     st.scatter_chart(scatter_df, x=x_axis_feature, y=target_col)
 
 
-# -----------------------------
-# Preprocesamiento
-# -----------------------------
-try:
-    one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-except TypeError:
-    one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
+# =========================================================
+# Preprocesamiento y modelo
+# =========================================================
 preprocessor = ColumnTransformer(
     transformers=[
         ("num", StandardScaler(), numeric_features),
-        ("cat", one_hot_encoder, categorical_features)
+        ("cat", make_one_hot_encoder(), categorical_features),
     ],
-    remainder="drop"
+    remainder="drop",
 )
 
-
-# -----------------------------
-# Elegir estimador
-# -----------------------------
 if problem_type == "Regresión":
-    if model_choice == "Regresión lineal / logística":
-        estimator = LinearRegression()
-    else:
-        estimator = RandomForestRegressor(
-            n_estimators=200,
-            random_state=random_state,
-            n_jobs=-1
-        )
+    estimator = (
+        LinearRegression()
+        if model_choice == "Regresión lineal / logística"
+        else RandomForestRegressor(n_estimators=200, random_state=int(random_state), n_jobs=-1)
+    )
 else:
-    if model_choice == "Regresión lineal / logística":
-        estimator = LogisticRegression(
-            max_iter=1000,
-            solver="liblinear"
-        )
-    else:
-        estimator = RandomForestClassifier(
-            n_estimators=200,
-            random_state=random_state,
-            n_jobs=-1
-        )
+    estimator = (
+        LogisticRegression(max_iter=1000, solver="liblinear")
+        if model_choice == "Regresión lineal / logística"
+        else RandomForestClassifier(n_estimators=200, random_state=int(random_state), n_jobs=-1)
+    )
 
-
-# -----------------------------
-# Botón para ejecutar
-# -----------------------------
-run_button = st.button("Ejecutar RFE")
-
+run_button = st.button("Ejecutar RFE", type="primary")
 if not run_button:
     st.stop()
 
 
-# -----------------------------
-# Train/test split
-# -----------------------------
+# =========================================================
+# Entrenamiento y RFE
+# =========================================================
 try:
     stratify = y if problem_type == "Clasificación" and y.nunique() > 1 else None
-
     X_train, X_test, y_train, y_test = train_test_split(
         X,
         y,
         test_size=test_size,
-        random_state=random_state,
-        stratify=stratify
+        random_state=int(random_state),
+        stratify=stratify,
     )
 except Exception as e:
     st.error(f"Error al dividir los datos: {e}")
     st.stop()
 
-
-# -----------------------------
-# Transformar variables
-# -----------------------------
 try:
     X_train_transformed = preprocessor.fit_transform(X_train)
     X_test_transformed = preprocessor.transform(X_test)
@@ -356,204 +422,126 @@ except Exception as e:
     st.error(f"Error en el preprocesamiento: {e}")
     st.stop()
 
-
-# -----------------------------
-# Ejecutar RFE
-# -----------------------------
-try:
-    rfe = RFE(
-        estimator=estimator,
-        n_features_to_select=n_features_to_select
+if n_features_to_select > len(feature_names):
+    st.warning(
+        "Después del preprocesamiento hay menos variables transformadas que las solicitadas. "
+        "Se ajustará automáticamente el número de variables a seleccionar."
     )
+    n_features_to_select = len(feature_names)
 
+try:
+    rfe = RFE(estimator=estimator, n_features_to_select=n_features_to_select)
     rfe.fit(X_train_transformed, y_train)
-
 except Exception as e:
     st.error(f"Error ejecutando RFE: {e}")
     st.stop()
 
 
-# -----------------------------
+# =========================================================
 # Resultados de selección
-# -----------------------------
-results = pd.DataFrame({
-    "variable_transformada": feature_names,
-    "seleccionada": rfe.support_,
-    "ranking": rfe.ranking_
-}).sort_values(["ranking", "variable_transformada"])
-
-selected_transformed_features = results.loc[
-    results["seleccionada"],
-    "variable_transformada"
-].tolist()
-
-st.subheader("Resultado de RFE: variables seleccionadas")
+# =========================================================
+results = pd.DataFrame(
+    {
+        "variable": feature_names,
+        "seleccionada": rfe.support_,
+        "ranking": rfe.ranking_,
+    }
+).sort_values(["ranking", "variable"])
 
 results_visual = results.copy()
-results_visual["estado"] = np.where(results_visual["seleccionada"], "✅ Seleccionada", "No seleccionada")
+results_visual["estado"] = np.where(results_visual["seleccionada"], "Seleccionada", "No seleccionada")
 results_visual["puntuacion_visual"] = results_visual["ranking"].max() - results_visual["ranking"] + 1
-results_visual["color"] = np.where(results_visual["seleccionada"], "#10b981", "#d1d5db")
+results_visual["color"] = np.where(results_visual["seleccionada"], SELECTED_COLOR, NOT_SELECTED_COLOR)
 
-summary_col1, summary_col2, summary_col3 = st.columns(3)
-with summary_col1:
+selected_features_rfe = results_visual.loc[results_visual["seleccionada"], "variable"].tolist()
+not_selected_features_rfe = results_visual.loc[~results_visual["seleccionada"], "variable"].tolist()
+
+st.subheader("Resultado de RFE")
+st.markdown(
+    '<div class="section-note">Las variables seleccionadas aparecen en verde. Las no seleccionadas aparecen en gris. El gráfico no usa emojis para mantener una lectura más limpia.</div>',
+    unsafe_allow_html=True,
+)
+
+rfe_col1, rfe_col2, rfe_col3 = st.columns(3)
+with rfe_col1:
     st.metric("Variables transformadas", len(results_visual))
-with summary_col2:
-    st.metric("Seleccionadas por RFE", int(results_visual["seleccionada"].sum()))
-with summary_col3:
+with rfe_col2:
+    st.metric("Seleccionadas", int(results_visual["seleccionada"].sum()))
+with rfe_col3:
     st.metric("No seleccionadas", int((~results_visual["seleccionada"]).sum()))
 
 st.markdown(
     """
-    <span class="legend-box legend-selected"></span><b>Verde:</b> variable seleccionada por RFE &nbsp;&nbsp;
-    <span class="legend-box legend-not-selected"></span><b>Gris:</b> variable no seleccionada
+    <span class="legend-box legend-selected"></span><b>Verde:</b> seleccionada por RFE &nbsp;&nbsp;
+    <span class="legend-box legend-not-selected"></span><b>Gris:</b> no seleccionada
     """,
     unsafe_allow_html=True,
 )
 
 st.markdown("#### Variables seleccionadas")
-if selected_transformed_features:
-    chips_html = "".join(
-        f'<span class="variable-chip chip-selected">{feature}</span>'
-        for feature in selected_transformed_features
-    )
-    st.markdown(chips_html, unsafe_allow_html=True)
-else:
-    st.info("No hay variables seleccionadas.")
+render_chips(selected_features_rfe, selected=True)
 
-st.markdown("#### Ranking visual horizontal con colores")
-
-# Gráfico horizontal para facilitar la lectura de nombres largos.
-# Primero aparecen las variables seleccionadas y después las no seleccionadas mejor rankeadas.
-plot_df = results_visual.sort_values(
-    ["seleccionada", "ranking", "variable_transformada"],
-    ascending=[False, True, True],
-).head(30).copy()
-
-plot_df["etiqueta"] = np.where(
-    plot_df["seleccionada"],
-    "✅ " + plot_df["variable_transformada"].astype(str),
-    "   " + plot_df["variable_transformada"].astype(str),
+st.markdown("#### Ranking horizontal")
+draw_rfe_ranking_chart(results_visual)
+st.caption(
+    "El gráfico muestra primero las variables seleccionadas y luego las no seleccionadas mejor posicionadas. "
+    "Los nombres fueron limpiados para ocultar prefijos técnicos como num__ y cat__."
 )
-
-fig_height = max(5, 0.45 * len(plot_df))
-fig, ax = plt.subplots(figsize=(13, fig_height))
-
-bars = ax.barh(
-    plot_df["etiqueta"],
-    plot_df["puntuacion_visual"],
-    color=plot_df["color"],
-)
-
-# La mejor variable queda arriba.
-ax.invert_yaxis()
-
-ax.set_xlabel("Puntuación visual: mayor valor = mejor ranking RFE")
-ax.set_ylabel("Variables")
-ax.set_title("Ranking RFE horizontal: seleccionadas en verde")
-ax.grid(axis="x", alpha=0.25)
-
-# Mostrar el ranking al final de cada barra.
-for bar, ranking in zip(bars, plot_df["ranking"]):
-    width = bar.get_width()
-    ax.text(
-        width + 0.05,
-        bar.get_y() + bar.get_height() / 2,
-        f"ranking {int(ranking)}",
-        va="center",
-        fontsize=9,
-    )
-
-# Dar espacio a las etiquetas de ranking a la derecha.
-ax.set_xlim(0, plot_df["puntuacion_visual"].max() + 2)
-fig.tight_layout()
-st.pyplot(fig)
-
-st.caption("Barras horizontales: arriba aparecen las variables seleccionadas en verde y luego las demás mejor rankeadas. Los prefijos técnicos num__ y cat__ fueron eliminados para facilitar la lectura.")
 
 with st.expander("Ver tabla completa con colores", expanded=True):
-    table_view = results_visual[["variable_transformada", "estado", "ranking", "puntuacion_visual"]]
-
-    def highlight_selected(row):
-        if row["estado"] == "✅ Seleccionada":
-            return ["background-color: #d1fae5; color: #065f46; font-weight: bold"] * len(row)
-        return ["background-color: #f9fafb; color: #6b7280"] * len(row)
-
-    st.dataframe(
-        table_view.style.apply(highlight_selected, axis=1),
-        use_container_width=True,
-    )
+    table_view = results_visual[["variable", "estado", "ranking", "puntuacion_visual"]]
+    st.dataframe(table_view.style.apply(highlight_selected, axis=1), use_container_width=True)
 
 with st.expander("Ver variables no seleccionadas", expanded=False):
-    not_selected_features = results_visual.loc[
-        ~results_visual["seleccionada"],
-        "variable_transformada"
-    ].tolist()
-    if not_selected_features:
-        chips_html = "".join(
-            f'<span class="variable-chip chip-not-selected">{feature}</span>'
-            for feature in not_selected_features
-        )
-        st.markdown(chips_html, unsafe_allow_html=True)
-    else:
-        st.success("Todas las variables transformadas fueron seleccionadas.")
+    render_chips(not_selected_features_rfe, selected=False)
 
 
-# -----------------------------
-# Entrenar modelo final con variables seleccionadas
-# -----------------------------
+# =========================================================
+# Modelo final y evaluación
+# =========================================================
 try:
     X_train_selected = rfe.transform(X_train_transformed)
     X_test_selected = rfe.transform(X_test_transformed)
 
     final_model = estimator
     final_model.fit(X_train_selected, y_train)
-
     y_pred = final_model.predict(X_test_selected)
-
 except Exception as e:
     st.error(f"Error entrenando el modelo final: {e}")
     st.stop()
 
-
-# -----------------------------
-# Métricas
-# -----------------------------
 st.subheader("Evaluación del modelo con variables seleccionadas")
 
 if problem_type == "Regresión":
     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
     r2 = r2_score(y_test, y_pred)
 
-    col1, col2 = st.columns(2)
-
-    with col1:
+    eval_col1, eval_col2 = st.columns(2)
+    with eval_col1:
         st.metric("RMSE", round(rmse, 4))
-
-    with col2:
+    with eval_col2:
         st.metric("R²", round(r2, 4))
 
     st.subheader("Predicción vs valor real")
-    pred_df = pd.DataFrame({
-        "real": np.array(y_test),
-        "predicho": np.array(y_pred),
-    }).sample(min(2000, len(y_test)), random_state=int(random_state))
-
+    pred_df = pd.DataFrame(
+        {
+            "real": np.array(y_test),
+            "predicho": np.array(y_pred),
+        }
+    ).sample(min(2000, len(y_test)), random_state=int(random_state))
     st.scatter_chart(pred_df, x="real", y="predicho")
 
-    st.subheader("Errores del modelo")
+    st.subheader("Distribución de errores")
     residuals_df = pd.DataFrame({"residuo": pred_df["real"] - pred_df["predicho"]})
     st.bar_chart(residuals_df["residuo"].value_counts(bins=30).sort_index())
-
 else:
     accuracy = accuracy_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred, average="weighted")
 
-    col1, col2 = st.columns(2)
-
-    with col1:
+    eval_col1, eval_col2 = st.columns(2)
+    with eval_col1:
         st.metric("Accuracy", round(accuracy, 4))
-
-    with col2:
+    with eval_col2:
         st.metric("F1 weighted", round(f1, 4))
 
     st.subheader("Matriz de confusión")
@@ -575,20 +563,21 @@ else:
             ax.text(j, i, cm[i, j], ha="center", va="center")
 
     fig.colorbar(image, ax=ax)
+    fig.tight_layout()
     st.pyplot(fig)
 
     with st.expander("Ver classification report", expanded=False):
         st.text(classification_report(y_test, y_pred))
 
 
-# -----------------------------
-# Descargar resultados
-# -----------------------------
-csv = results.to_csv(index=False).encode("utf-8")
+# =========================================================
+# Descarga de resultados
+# =========================================================
+csv = results.drop(columns=[]).to_csv(index=False).encode("utf-8")
 
 st.download_button(
     label="Descargar ranking de variables",
     data=csv,
     file_name="rfe_ranking_variables.csv",
-    mime="text/csv"
+    mime="text/csv",
 )
