@@ -4,6 +4,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
+from sklearn.datasets import fetch_california_housing
 from sklearn.model_selection import train_test_split
 from sklearn.feature_selection import RFE
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -16,7 +17,7 @@ from sklearn.metrics import (
     r2_score,
     accuracy_score,
     f1_score,
-    classification_report
+    classification_report,
 )
 
 
@@ -26,26 +27,38 @@ st.set_page_config(
 )
 
 st.title("Selección de variables con RFE")
-st.write("Carga un archivo Parquet, elige tu variable objetivo y aplica Recursive Feature Elimination.")
+st.write(
+    "Por defecto se carga California Housing. También puedes subir un archivo Parquet "
+    "y elegir la variable objetivo y los predictores con checkboxes."
+)
 
 
 # -----------------------------
 # Cargar datos
 # -----------------------------
-uploaded_file = st.file_uploader(
-    "Carga tu archivo .parquet",
+st.sidebar.header("Datos")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Opcional: carga tu archivo .parquet",
     type=["parquet"]
 )
 
-if uploaded_file is None:
-    st.info("Sube un archivo Parquet para comenzar.")
-    st.stop()
+@st.cache_data
+def load_california_housing():
+    california = fetch_california_housing(as_frame=True)
+    df_california = california.frame.copy()
+    return df_california
 
-try:
-    df = pd.read_parquet(uploaded_file)
-except Exception as e:
-    st.error(f"No se pudo leer el archivo Parquet: {e}")
-    st.stop()
+if uploaded_file is None:
+    df = load_california_housing()
+    st.info("Usando dataset por defecto: California Housing.")
+else:
+    try:
+        df = pd.read_parquet(uploaded_file)
+        st.success("Archivo Parquet cargado correctamente.")
+    except Exception as e:
+        st.error(f"No se pudo leer el archivo Parquet: {e}")
+        st.stop()
 
 st.subheader("Vista previa de los datos")
 st.dataframe(df.head())
@@ -58,27 +71,52 @@ st.write(f"Filas: **{df.shape[0]}** | Columnas: **{df.shape[1]}**")
 # -----------------------------
 st.sidebar.header("Configuración del modelo")
 
-target_col = st.sidebar.selectbox(
-    "Variable objetivo",
-    options=df.columns
-)
+columns = df.columns.tolist()
+
+default_target = "MedHouseVal" if "MedHouseVal" in columns else columns[-1]
+
+st.sidebar.markdown("### Variable objetivo")
+st.sidebar.caption("Marca exactamente una columna como target.")
+
+target_candidates = []
+for col in columns:
+    checked = st.sidebar.checkbox(
+        label=col,
+        value=(col == default_target),
+        key=f"target_{col}"
+    )
+    if checked:
+        target_candidates.append(col)
+
+if len(target_candidates) != 1:
+    st.warning("Selecciona exactamente una variable objetivo en la barra lateral.")
+    st.stop()
+
+target_col = target_candidates[0]
+
+available_features = [col for col in columns if col != target_col]
+
+st.sidebar.markdown("### Variables predictoras")
+st.sidebar.caption("Marca las columnas que quieres usar como predictores.")
+
+selected_features = []
+for col in available_features:
+    checked = st.sidebar.checkbox(
+        label=col,
+        value=True,
+        key=f"feature_{col}"
+    )
+    if checked:
+        selected_features.append(col)
+
+if len(selected_features) == 0:
+    st.warning("Selecciona al menos una variable predictora.")
+    st.stop()
 
 problem_type = st.sidebar.selectbox(
     "Tipo de problema",
     options=["Regresión", "Clasificación"]
 )
-
-available_features = [col for col in df.columns if col != target_col]
-
-selected_features = st.sidebar.multiselect(
-    "Variables predictoras",
-    options=available_features,
-    default=available_features
-)
-
-if len(selected_features) == 0:
-    st.warning("Selecciona al menos una variable predictora.")
-    st.stop()
 
 n_features_to_select = st.sidebar.slider(
     "Número de variables a seleccionar",
@@ -109,6 +147,11 @@ random_state = st.sidebar.number_input(
     value=42,
     step=1
 )
+
+st.subheader("Selección actual")
+st.write(f"**Target:** {target_col}")
+st.write("**Predictores:**")
+st.write(selected_features)
 
 
 # -----------------------------
@@ -145,10 +188,15 @@ with col2:
 # -----------------------------
 # Preprocesamiento
 # -----------------------------
+try:
+    one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+except TypeError:
+    one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
+
 preprocessor = ColumnTransformer(
     transformers=[
         ("num", StandardScaler(), numeric_features),
-        ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), categorical_features)
+        ("cat", one_hot_encoder, categorical_features)
     ],
     remainder="drop"
 )
@@ -246,7 +294,7 @@ results = pd.DataFrame({
 }).sort_values(["ranking", "variable_transformada"])
 
 selected_transformed_features = results.loc[
-    results["seleccionada"], 
+    results["seleccionada"],
     "variable_transformada"
 ].tolist()
 
