@@ -7,5 +7,7 @@ seaborn
 openpyxl
 pyarrow
 catboost
+xgboost
+lightgbm
 optuna
 plotly
