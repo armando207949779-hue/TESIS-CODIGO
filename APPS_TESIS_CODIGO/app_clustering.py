@@ -154,11 +154,6 @@ for col in numeric_columns:
         selected_columns.append(col)
 
 
-if len(selected_columns) < 2:
-    st.warning("Selecciona al menos 2 columnas numéricas.")
-    st.stop()
-
-
 algorithm = st.sidebar.selectbox(
     "Algoritmo de clustering",
     ["K-Means", "DBSCAN", "Jerárquico"]
@@ -185,6 +180,27 @@ min_samples = st.sidebar.slider(
     max_value=20,
     value=5
 )
+
+
+st.sidebar.markdown("---")
+
+confirmar = st.sidebar.button(
+    "Confirmar y ejecutar clustering",
+    type="primary"
+)
+
+
+if not confirmar:
+    st.info(
+        "Configura las columnas y el algoritmo en la barra lateral. "
+        "Luego presiona **Confirmar y ejecutar clustering** para ver los resultados."
+    )
+    st.stop()
+
+
+if len(selected_columns) < 2:
+    st.warning("Selecciona al menos 2 columnas numéricas.")
+    st.stop()
 
 
 X = df[selected_columns].copy()
